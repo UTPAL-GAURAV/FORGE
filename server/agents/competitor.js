@@ -35,23 +35,29 @@ ${priorContext}
 
 RULES:
 - Ask ONE sharp question at a time. Never two questions in one message.
-- Questions must be specific to THIS pitch and its named competitors.
+- NEVER ask "who are your competitors?" — you already know the market. Name them. Attack with specifics.
+- If no competitors were provided, infer the obvious ones from the pitch description and use them.
 - Focus on: differentiation, moat, switching costs, pricing pressure, copy risk.
 - Stage awareness: ${pitch.stage === 'Idea' ? 'Pre-revenue — attack the assumption of differentiation, not proven metrics.' : pitch.stage === 'Revenue' || pitch.stage === 'Growth' ? 'Revenue stage — demand proof of retention vs competitors and defensible pricing.' : 'Early stage — probe what stops a well-funded competitor from replicating this.'}
-- Do not hallucinate competitors or features. Only reference what is in the pitch.
+- Do not hallucinate features or traction numbers. Only reference what is in the pitch.
 - Max 3 sentences total (pushback + question).`
 }
 
 // ─── INITIALISE QUEUE FROM PITCH ─────────────────────────────────────────────
 // Generate the opening question bank based on pitch context
 async function initQueue(pitch) {
+  const competitorContext = pitch.competitors
+    ? `Named competitors: ${pitch.competitors}`
+    : `No competitors named. Based on the pitch, infer the 2-3 most obvious real competitors in this space (by name) and use them in your questions. Do not ask the founder who their competitors are — you already know the market.`
+
   const prompt = `Based on this pitch, generate 5 sharp competitor-focused questions as a JSON array.
 Each question is an object: { "question": "...", "topic": "...", "priority": 1-5 }
-Priority 1 = most dangerous. Focus on: who else does this, why won't the top competitor copy this feature, pricing vs competitors, switching costs, moat.
+Priority 1 = most dangerous. Focus on: why won't [specific named competitor] copy this, pricing vs named alternatives, switching costs, moat, copy risk.
+Questions must name specific competitors — never ask "who are your competitors?".
 Only output valid JSON. No explanation.
 
 Pitch: ${pitch.name} — ${pitch.one_liner}
-${pitch.competitors ? `Named competitors: ${pitch.competitors}` : 'Competitors: none provided'}
+${competitorContext}
 ${pitch.revenue_model ? `Revenue model: ${pitch.revenue_model}` : ''}
 ${pitch.traction ? `Traction: ${pitch.traction}` : ''}
 ${pitch.tam ? `Market: ${pitch.tam}` : ''}`
@@ -61,12 +67,9 @@ ${pitch.tam ? `Market: ${pitch.tam}` : ''}`
     const questions = JSON.parse(res)
     return questions.map(q => ({ ...q, depth: 0 })).sort((a, b) => a.priority - b.priority)
   } catch {
-    // Fallback queue if parse fails
-    const competitorRef = pitch.competitors
-      ? `your named competitors (${pitch.competitors})`
-      : 'an established player in this space'
+    const competitorRef = pitch.competitors || 'a well-funded incumbent in this space'
     return [
-      { question: `What specifically stops ${competitorRef} from building exactly what you're building in the next 6 months?`, topic: 'copy_risk', priority: 1, depth: 0 },
+      { question: `What specifically stops ${competitorRef} from shipping your core feature in 60 days?`, topic: 'copy_risk', priority: 1, depth: 0 },
       { question: 'What is your moat — and why is it durable, not just a head start?', topic: 'moat', priority: 2, depth: 0 },
       { question: 'How does your pricing compare to alternatives and why won\'t customers just switch?', topic: 'pricing_defensibility', priority: 3, depth: 0 },
     ]
@@ -122,9 +125,10 @@ Rules:
 // ─── GENERATE FIRST QUESTION ─────────────────────────────────────────────────
 function getFirstQuestion(pitch) {
   if (pitch.competitors) {
-    return `You listed ${pitch.competitors} as your competition — what specifically stops them from building exactly what you're building tomorrow?`
+    return `You listed ${pitch.competitors} as your competition — what specifically stops them from shipping exactly what you're building in the next 60 days?`
   }
-  return `Who are your top 3 competitors and what makes you genuinely different from each of them?`
+  // No competitors provided — agent names the obvious ones and attacks directly
+  return `${pitch.name} operates in a space with well-funded incumbents. Without knowing your moat, I'd assume a larger player ships your core feature as a minor update. What's the specific reason that doesn't happen?`
 }
 
 // ─── DEBRIEF NOMINATION ──────────────────────────────────────────────────────

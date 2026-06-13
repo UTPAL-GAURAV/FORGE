@@ -9,10 +9,10 @@ const SEVERITY_META = {
 }
 
 const AGENT_META = {
-  investor:   { label: 'Investor',   color: '#e8ff47' },
-  competitor: { label: 'Competitor', color: '#ff8c47' },
-  red_team:   { label: 'Red Team',   color: '#ff4747' },
-  customer:   { label: 'Customer',   color: '#47c8ff' },
+  investor:   { label: 'Investor',   color: '#e8ff47', provider: 'AI/ML API' },
+  competitor: { label: 'Competitor', color: '#ff8c47', provider: 'Featherless' },
+  red_team:   { label: 'Red Team',   color: '#ff4747', provider: 'AI/ML API' },
+  customer:   { label: 'Customer',   color: '#47c8ff', provider: 'Featherless' },
 }
 
 const NOMINATION_COLOR = {
@@ -276,6 +276,7 @@ export default function Debrief() {
                     <span className="debrief-agent-stat-name" style={{ color: AGENT_META[agent]?.color }}>
                       {AGENT_META[agent]?.label}
                     </span>
+                    <span className="debrief-agent-stat-provider">{AGENT_META[agent]?.provider}</span>
                     <span className="debrief-agent-stat-asked">{count} asked</span>
                     {stats.unaskedByAgent?.[agent] > 0 && (
                       <span className="debrief-agent-stat-unasked">

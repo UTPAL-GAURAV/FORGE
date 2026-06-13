@@ -4,10 +4,10 @@ import { API_URL } from '../context/AuthContext'
 import { useDeepgram } from '../hooks/useDeepgram'
 
 const AGENT_META = {
-  investor:   { label: 'Investor',   color: '#e8ff47', emoji: '💰' },
-  competitor: { label: 'Competitor', color: '#ff8c47', emoji: '⚔️' },
-  red_team:   { label: 'Red Team',   color: '#ff4747', emoji: '🔴' },
-  customer:   { label: 'Customer',   color: '#47c8ff', emoji: '🎯' },
+  investor:   { label: 'Investor',   color: '#e8ff47', emoji: '💰', provider: 'AI/ML API' },
+  competitor: { label: 'Competitor', color: '#ff8c47', emoji: '⚔️', provider: 'Featherless' },
+  red_team:   { label: 'Red Team',   color: '#ff4747', emoji: '🔴', provider: 'AI/ML API' },
+  customer:   { label: 'Customer',   color: '#47c8ff', emoji: '🎯', provider: 'Featherless' },
 }
 
 const EVENT_LABELS = {
@@ -229,6 +229,13 @@ export default function SessionRunner() {
       const data = await r.json()
       if (!r.ok) throw new Error(data.error)
 
+      // Queues still initialising — retry after 1.5s without showing an error
+      if (data.queuesLoading) {
+        setSubmitting(false)
+        setTimeout(() => { handleSubmitRef.current?.() }, 1500)
+        return
+      }
+
       if (data.sidebarEvents) pushSidebar(data.sidebarEvents)
 
       if (data.sessionEnded) {
@@ -415,16 +422,19 @@ export default function SessionRunner() {
       {/* ── RIGHT PANEL: Agent Activity ─────────────────────── */}
       <div className="session-sidebar">
         <div className="sidebar-header">
-          <span className="sidebar-title">Agent Activity</span>
+          <div className="sidebar-header-text">
+            <span className="sidebar-title">Agent Activity</span>
+            <span className="sidebar-subtitle">Band room · 4 agents · events via Band API</span>
+          </div>
           <span className="sidebar-live-dot" />
           <span className="sidebar-live-label">LIVE</span>
-          <span className="sidebar-demo-note">Demo only</span>
         </div>
 
         <div className="sidebar-agent-status">
           {Object.entries(AGENT_META).map(([key, meta]) => (
             <div key={key} className={`sidebar-agent-pill ${activeAgent === key ? 'active' : ''}`} style={activeAgent === key ? { borderColor: meta.color, color: meta.color } : {}}>
-              {meta.emoji} {meta.label}
+              <span>{meta.emoji} {meta.label}</span>
+              <span className="sidebar-agent-provider">{meta.provider}</span>
             </div>
           ))}
         </div>
@@ -472,11 +482,14 @@ function SidebarEvent({ event }) {
   if (event.type === 'WEAK_POINT' || event.type === 'STRONG_POINT' || event.type === 'CONTRADICTION' || event.type === 'DEFLECTION') {
     detail = `${p.topic || ''}${p.note ? ' — ' + p.note : ''}${p.confidence ? ` (${p.confidence})` : ''}`
   } else if (event.type === 'QUEUE_UPDATE' && p.added?.length) {
-    detail = `+${p.added.length} question${p.added.length > 1 ? 's' : ''} queued`
+    const first = p.added[0]
+    detail = first.topic ? `+queued: ${first.topic}` : `+${p.added.length} queued`
   } else if (event.type === 'FOLLOW_UP' && p.question) {
     detail = p.question.slice(0, 80) + (p.question.length > 80 ? '…' : '')
   } else if (event.type === 'PASS_CONTROL') {
-    detail = 'satisfied'
+    // Show which agent is receiving control, or just "satisfied" if no next agent info
+    const next = p.nextAgent ? ` → ${AGENT_META[p.nextAgent]?.label || p.nextAgent}` : ''
+    detail = `satisfied${next}`
   } else if (event.type === 'AGENT_QUESTION' && p.topic) {
     detail = p.topic
   }

@@ -14,10 +14,11 @@ function headers(apiKey) {
 }
 
 // Create a new Band chat room (called as Investor agent)
-async function createRoom(projectName) {
+async function createRoom(projectName, roundNumber) {
+  const name = roundNumber ? `${projectName} — Round ${roundNumber}` : projectName
   const res = await axios.post(
     `${BAND_BASE}/chats`,
-    { chat: {} },
+    { chat: { name } },
     { headers: headers(agents.investor.key) }
   )
   return res.data.data.id
@@ -76,7 +77,7 @@ async function postMessage(roomId, agentName, text) {
 
 // Full session start: create room, add agents, post brief
 async function initSession(project) {
-  const roomId = await createRoom(project.name)
+  const roomId = await createRoom(project.name, project.round_number)
   await addAgentsToRoom(roomId)
   await postPitchBrief(roomId, project)
   return roomId

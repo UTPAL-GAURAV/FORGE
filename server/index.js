@@ -41,8 +41,16 @@ app.use('/api/auth', authRoutes);
 app.use('/api/projects', projectRoutes);
 app.use('/api/sessions', sessionRoutes);
 
+// Band webhook — Band fires this when an agent receives a message in a room.
+// We drive agents through our own /turn endpoint, not Band's execution engine,
+// so we acknowledge immediately with an empty result to keep executions clean.
+app.post('/api/band/webhook', (req, res) => {
+  res.json({})
+})
+
 async function ensureTables() {
   await pool.query(`ALTER TABLE sessions ADD COLUMN IF NOT EXISTS outcome_logged BOOLEAN DEFAULT false`)
+  await pool.query(`ALTER TABLE sessions ADD COLUMN IF NOT EXISTS queues_ready BOOLEAN DEFAULT true`)
   await pool.query(`
     CREATE TABLE IF NOT EXISTS session_debriefs (
       id UUID PRIMARY KEY DEFAULT gen_random_uuid(),

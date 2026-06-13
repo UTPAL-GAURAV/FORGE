@@ -1166,7 +1166,9 @@ footer {
   border-bottom: 1px solid var(--border);
   flex-shrink: 0;
 }
+.sidebar-header-text { display: flex; flex-direction: column; gap: 2px; }
 .sidebar-title { font-size: 12px; font-weight: 700; letter-spacing: 0.1em; text-transform: uppercase; color: var(--text-muted); }
+.sidebar-subtitle { font-size: 10px; color: #e8ff47; opacity: 0.55; letter-spacing: 0.02em; }
 .sidebar-live-dot {
   width: 7px; height: 7px;
   border-radius: 50%;
@@ -1193,9 +1195,18 @@ footer {
   border: 1px solid var(--border);
   color: var(--text-muted);
   transition: all 0.2s;
+  display: flex;
+  align-items: center;
+  gap: 6px;
 }
 .sidebar-agent-pill.active {
   background: var(--accent-dim);
+}
+.sidebar-agent-provider {
+  font-size: 9px;
+  font-weight: 400;
+  opacity: 0.5;
+  letter-spacing: 0.02em;
 }
 
 .sidebar-events {
@@ -1530,6 +1541,7 @@ footer {
   font-size: 11px;
 }
 .debrief-agent-stat-name { font-weight: 600; min-width: 72px; }
+.debrief-agent-stat-provider { font-size: 9px; color: var(--text-muted); opacity: 0.5; }
 .debrief-agent-stat-asked { color: var(--text-muted); }
 .debrief-agent-stat-unasked { color: var(--red); font-size: 10px; }
 
