@@ -17,13 +17,18 @@ const AGENTS = {
 
 const AGENT_ORDER = ['investor', 'competitor', 'red_team', 'customer']
 
+function logErr(label, err) {
+  console.error(`[${label}]`, err.message)
+  if (err.response?.data) console.error(`[${label}] API response:`, JSON.stringify(err.response.data))
+  if (err.stack) console.error(err.stack)
+}
+
 // POST start a new session (round) for a project
 router.post('/', requireAuth, async (req, res) => {
   const { project_id } = req.body
   if (!project_id) return res.status(400).json({ error: 'project_id required' })
 
   try {
-    // Verify project belongs to user
     const { rows: projects } = await pool.query(
       'SELECT * FROM projects WHERE id = $1 AND user_id = $2',
       [project_id, req.user.id]
@@ -31,17 +36,14 @@ router.post('/', requireAuth, async (req, res) => {
     if (!projects.length) return res.status(404).json({ error: 'Project not found' })
     const project = projects[0]
 
-    // Get next round number
     const { rows: existing } = await pool.query(
       'SELECT COUNT(*) FROM sessions WHERE project_id = $1',
       [project_id]
     )
     const round_number = parseInt(existing[0].count) + 1
 
-    // Create Band room and add all 4 agents
     const band_room_id = await initSession(project)
 
-    // Create session in DB
     const { rows } = await pool.query(
       `INSERT INTO sessions (project_id, user_id, round_number, band_room_id, active_agent)
        VALUES ($1, $2, $3, $4, 'investor') RETURNING *`,
@@ -49,7 +51,6 @@ router.post('/', requireAuth, async (req, res) => {
     )
     const session = rows[0]
 
-    // Initialise empty queues for all 4 agents
     await pool.query(
       `INSERT INTO agent_queues (session_id, agent, questions) VALUES
        ($1, 'investor', '[]'),
@@ -59,7 +60,6 @@ router.post('/', requireAuth, async (req, res) => {
       [session.id]
     )
 
-    // Log session start event
     await pool.query(
       `INSERT INTO session_events (session_id, event_type, payload)
        VALUES ($1, 'SESSION_START', $2)`,
@@ -68,7 +68,7 @@ router.post('/', requireAuth, async (req, res) => {
 
     res.status(201).json(session)
   } catch (err) {
-    console.error('Session start error:', err.message)
+    logErr('POST /sessions', err)
     res.status(500).json({ error: 'Failed to start session' })
   }
 })
@@ -88,6 +88,7 @@ router.get('/:id', requireAuth, async (req, res) => {
     if (!rows.length) return res.status(404).json({ error: 'Session not found' })
     res.json(rows[0])
   } catch (err) {
+    logErr('GET /sessions/:id', err)
     res.status(500).json({ error: 'Failed to fetch session' })
   }
 })
@@ -124,7 +125,7 @@ router.get('/:id/state', requireAuth, async (req, res) => {
 
     res.json({ session, events, agentQueues })
   } catch (err) {
-    console.error('Session state error:', err.message)
+    logErr('GET /sessions/:id/state', err)
     res.status(500).json({ error: 'Failed to fetch session state' })
   }
 })
@@ -146,13 +147,21 @@ router.post('/:id/start', requireAuth, async (req, res) => {
     const session = sessions[0]
     const pitch = buildPitch(session)
 
-    // Initialise all 4 agent queues in parallel
-    const [investorQ, competitorQ, redteamQ, customerQ] = await Promise.all([
+    // Stagger initQueue calls: AIML pair first, then Featherless pair (avoid simultaneous 429s)
+    console.log('[/start] initQueue investor + red_team...')
+    const [investorQ, redteamQ] = await Promise.all([
       AGENTS.investor.initQueue(pitch),
-      AGENTS.competitor.initQueue(pitch),
       AGENTS.red_team.initQueue(pitch),
-      AGENTS.customer.initQueue(pitch),
     ])
+    console.log('[/start] investor queue:', investorQ?.length, 'redteam queue:', redteamQ?.length)
+
+    console.log('[/start] initQueue competitor...')
+    const competitorQ = await AGENTS.competitor.initQueue(pitch)
+    console.log('[/start] competitor queue:', competitorQ?.length)
+
+    console.log('[/start] initQueue customer...')
+    const customerQ = await AGENTS.customer.initQueue(pitch)
+    console.log('[/start] customer queue:', customerQ?.length)
 
     await Promise.all([
       pool.query(`UPDATE agent_queues SET questions = $1, updated_at = NOW() WHERE session_id = $2 AND agent = 'investor'`, [JSON.stringify(investorQ), session.id]),
@@ -161,26 +170,22 @@ router.post('/:id/start', requireAuth, async (req, res) => {
       pool.query(`UPDATE agent_queues SET questions = $1, updated_at = NOW() WHERE session_id = $2 AND agent = 'customer'`, [JSON.stringify(customerQ), session.id]),
     ])
 
-    // Investor always opens — deterministic first question
     const firstQ = AGENTS.investor.getFirstQuestion(pitch)
+    console.log('[/start] first question:', firstQ)
 
-    // Persist the opening question as an event
     await pool.query(
       `INSERT INTO session_events (session_id, event_type, agent, payload)
        VALUES ($1, 'AGENT_QUESTION', 'investor', $2)`,
       [session.id, JSON.stringify({ question: firstQ, topic: 'valuation', isFirst: true, answer: null })]
     )
 
-    // Post to Band room
     await postEvent(session.band_room_id, 'investor', 'AGENT_QUESTION', { question: firstQ, topic: 'valuation', isFirst: true })
     await postMessage(session.band_room_id, 'investor', firstQ)
 
-    // Sidebar event for judge visibility
     const sidebarEvent = { type: 'AGENT_QUESTION', agent: 'investor', payload: { question: firstQ, topic: 'valuation' } }
-
     res.json({ question: firstQ, activeAgent: 'investor', sidebarEvents: [sidebarEvent] })
   } catch (err) {
-    console.error('Session start error:', err.message)
+    logErr('POST /sessions/:id/start', err)
     res.status(500).json({ error: 'Failed to start session' })
   }
 })
@@ -207,14 +212,12 @@ router.post('/:id/turn', requireAuth, async (req, res) => {
     const session = sessions[0]
     const pitch = buildPitch(session)
 
-    // Persist founder response — attach to the open question event
     await pool.query(
       `INSERT INTO session_events (session_id, event_type, agent, payload)
        VALUES ($1, 'FOUNDER_RESPONSE', NULL, $2)`,
       [session.id, JSON.stringify({ answer: founderResponse, toQuestion: lastQuestion, toAgent: activeAgent })]
     )
 
-    // Get all current queues + recent annotations
     const { rows: queues } = await pool.query(
       `SELECT agent, questions FROM agent_queues WHERE session_id = $1`,
       [session.id]
@@ -230,46 +233,94 @@ router.post('/:id/turn', requireAuth, async (req, res) => {
     )
     const allAnnotations = recentAnnotations.map(r => r.payload)
 
-    // All 4 agents evaluate in parallel (silent — only active agent controls question)
     const sidebarEvents = []
 
-    const evaluationResults = await Promise.allSettled(
-      AGENT_ORDER.map(agentName => {
-        const currentQueue = agentQueues[agentName] || []
-        return AGENTS[agentName].evaluateResponse
-          ? AGENTS[agentName].evaluateResponse(pitch, founderResponse, lastQuestion, currentQueue, allAnnotations)
+    // ── Step 1: Active agent evaluates first — determines follow-up or pass ──
+    const activeEvalResult = await (AGENTS[activeAgent].evaluateResponse
+      ? AGENTS[activeAgent].evaluateResponse(pitch, founderResponse, lastQuestion, agentQueues[activeAgent] || [], allAnnotations)
+      : Promise.resolve(null)
+    ).catch(err => { logErr(`turn activeEval[${activeAgent}]`, err); return null })
+
+    // Persist active agent annotation + queue update immediately
+    if (activeEvalResult?.annotation) {
+      await pool.query(
+        `INSERT INTO session_events (session_id, event_type, agent, payload) VALUES ($1, $2, $3, $4)`,
+        [session.id, activeEvalResult.annotation.type, activeAgent, JSON.stringify({ ...activeEvalResult.annotation, agent: activeAgent })]
+      )
+      await postEvent(session.band_room_id, activeAgent, activeEvalResult.annotation.type, { ...activeEvalResult.annotation, agent: activeAgent }).catch(() => {})
+      sidebarEvents.push({ type: activeEvalResult.annotation.type, agent: activeAgent, payload: activeEvalResult.annotation })
+    }
+    if (activeEvalResult?.newQueueItems?.length) {
+      const existing = agentQueues[activeAgent] || []
+      const updated = [...existing, ...activeEvalResult.newQueueItems].sort((a, b) => a.priority - b.priority)
+      await pool.query(`UPDATE agent_queues SET questions = $1, updated_at = NOW() WHERE session_id = $2 AND agent = $3`, [JSON.stringify(updated), session.id, activeAgent])
+      agentQueues[activeAgent] = updated
+      await postEvent(session.band_room_id, activeAgent, 'QUEUE_UPDATE', { added: activeEvalResult.newQueueItems }).catch(() => {})
+      sidebarEvents.push({ type: 'QUEUE_UPDATE', agent: activeAgent, payload: { added: activeEvalResult.newQueueItems } })
+    }
+
+    // ── Step 2: Active agent decides next question — before other agents run ──
+    let nextQuestion = null
+    let nextAgent = activeAgent
+    let sessionEnded = false
+
+    if (activeEvalResult && !activeEvalResult.satisfied && activeEvalResult.followUp) {
+      nextQuestion = activeEvalResult.followUp
+      await postEvent(session.band_room_id, activeAgent, 'FOLLOW_UP', { question: activeEvalResult.followUp }).catch(() => {})
+      sidebarEvents.push({ type: 'FOLLOW_UP', agent: activeAgent, payload: { question: activeEvalResult.followUp } })
+    } else {
+      await postEvent(session.band_room_id, activeAgent, 'PASS_CONTROL', { reason: 'satisfied' }).catch(() => {})
+      sidebarEvents.push({ type: 'PASS_CONTROL', agent: activeAgent, payload: { reason: 'satisfied' } })
+
+      const nextAgentName = pickNextAgent(agentQueues, activeAgent)
+      if (!nextAgentName) {
+        sessionEnded = true
+        await pool.query(`UPDATE sessions SET status = 'completed', completed_at = NOW() WHERE id = $1`, [session.id])
+        sidebarEvents.push({ type: 'SESSION_COMPLETE', agent: 'system', payload: { message: 'All queues exhausted' } })
+      } else {
+        nextAgent = nextAgentName
+        const queue = agentQueues[nextAgentName] || []
+        if (queue.length > 0) {
+          nextQuestion = queue[0].question
+          const remaining = queue.slice(1)
+          await pool.query(`UPDATE agent_queues SET questions = $1, updated_at = NOW() WHERE session_id = $2 AND agent = $3`, [JSON.stringify(remaining), session.id, nextAgentName])
+          agentQueues[nextAgentName] = remaining
+        }
+      }
+    }
+
+    // ── Step 3: Other agents evaluate in background (annotations + queue only) ──
+    const otherAgents = AGENT_ORDER.filter(a => a !== activeAgent)
+    const otherResults = await Promise.allSettled(
+      otherAgents.map(agentName =>
+        AGENTS[agentName].evaluateResponse
+          ? AGENTS[agentName].evaluateResponse(pitch, founderResponse, lastQuestion, agentQueues[agentName] || [], allAnnotations)
           : Promise.resolve(null)
-      })
+      )
     )
 
-    // Persist annotations and queue updates for all agents
-    await Promise.all(
-      AGENT_ORDER.map(async (agentName, idx) => {
-        const result = evaluationResults[idx]
-        if (result.status !== 'fulfilled' || !result.value) return
+    otherResults.forEach((r, i) => {
+      if (r.status === 'rejected') logErr(`turn evaluateResponse[${otherAgents[i]}]`, r.reason)
+    })
 
+    await Promise.all(
+      otherAgents.map(async (agentName, idx) => {
+        const result = otherResults[idx]
+        if (result.status !== 'fulfilled' || !result.value) return
         const evaluation = result.value
 
-        // Persist annotation
         if (evaluation.annotation) {
           await pool.query(
-            `INSERT INTO session_events (session_id, event_type, agent, payload)
-             VALUES ($1, $2, $3, $4)`,
+            `INSERT INTO session_events (session_id, event_type, agent, payload) VALUES ($1, $2, $3, $4)`,
             [session.id, evaluation.annotation.type, agentName, JSON.stringify({ ...evaluation.annotation, agent: agentName })]
           )
-          // Post to Band
           await postEvent(session.band_room_id, agentName, evaluation.annotation.type, { ...evaluation.annotation, agent: agentName }).catch(() => {})
           sidebarEvents.push({ type: evaluation.annotation.type, agent: agentName, payload: evaluation.annotation })
         }
-
-        // Update queue with new items
         if (evaluation.newQueueItems?.length) {
           const existing = agentQueues[agentName] || []
           const updated = [...existing, ...evaluation.newQueueItems].sort((a, b) => a.priority - b.priority)
-          await pool.query(
-            `UPDATE agent_queues SET questions = $1, updated_at = NOW() WHERE session_id = $2 AND agent = $3`,
-            [JSON.stringify(updated), session.id, agentName]
-          )
+          await pool.query(`UPDATE agent_queues SET questions = $1, updated_at = NOW() WHERE session_id = $2 AND agent = $3`, [JSON.stringify(updated), session.id, agentName])
           agentQueues[agentName] = updated
           await postEvent(session.band_room_id, agentName, 'QUEUE_UPDATE', { added: evaluation.newQueueItems }).catch(() => {})
           sidebarEvents.push({ type: 'QUEUE_UPDATE', agent: agentName, payload: { added: evaluation.newQueueItems } })
@@ -277,60 +328,6 @@ router.post('/:id/turn', requireAuth, async (req, res) => {
       })
     )
 
-    // Active agent decides: follow up or pass control
-    const activeEvalIdx = AGENT_ORDER.indexOf(activeAgent)
-    const activeEval = activeEvalIdx >= 0 && evaluationResults[activeEvalIdx].status === 'fulfilled'
-      ? evaluationResults[activeEvalIdx].value
-      : null
-
-    let nextQuestion = null
-    let nextAgent = activeAgent
-    let sessionEnded = false
-
-    if (activeEval && !activeEval.satisfied && activeEval.followUp) {
-      // Follow up from same agent
-      nextQuestion = activeEval.followUp
-      await postEvent(session.band_room_id, activeAgent, 'FOLLOW_UP', { question: activeEval.followUp }).catch(() => {})
-      sidebarEvents.push({ type: 'FOLLOW_UP', agent: activeAgent, payload: { question: activeEval.followUp } })
-    } else {
-      // Pass control — find next agent with highest-priority queued item
-      await postEvent(session.band_room_id, activeAgent, 'PASS_CONTROL', { reason: 'satisfied' }).catch(() => {})
-      sidebarEvents.push({ type: 'PASS_CONTROL', agent: activeAgent, payload: { reason: 'satisfied' } })
-
-      const nextAgentName = pickNextAgent(agentQueues)
-
-      if (!nextAgentName) {
-        // All queues exhausted — session ends
-        sessionEnded = true
-        await pool.query(
-          `UPDATE sessions SET status = 'completed', completed_at = NOW() WHERE id = $1`,
-          [session.id]
-        )
-        sidebarEvents.push({ type: 'SESSION_COMPLETE', agent: 'system', payload: { message: 'All queues exhausted' } })
-      } else {
-        nextAgent = nextAgentName
-        const queue = agentQueues[nextAgentName] || []
-        if (queue.length > 0) {
-          nextQuestion = queue[0].question
-          // Remove asked question from queue
-          const remaining = queue.slice(1)
-          await pool.query(
-            `UPDATE agent_queues SET questions = $1, updated_at = NOW() WHERE session_id = $2 AND agent = $3`,
-            [JSON.stringify(remaining), session.id, nextAgentName]
-          )
-          agentQueues[nextAgentName] = remaining
-        }
-      }
-    }
-
-    // Remove the asked question from active agent's queue for follow-ups (it's being asked now)
-    if (nextQuestion && nextAgent === activeAgent) {
-      // Already managed above for follow-up — nothing to pop
-    } else if (nextQuestion && nextAgent !== activeAgent) {
-      // Already popped from nextAgent's queue above
-    }
-
-    // Persist next question event
     if (nextQuestion) {
       await pool.query(
         `INSERT INTO session_events (session_id, event_type, agent, payload)
@@ -338,18 +335,12 @@ router.post('/:id/turn', requireAuth, async (req, res) => {
         [session.id, nextAgent, JSON.stringify({ question: nextQuestion, topic: 'follow_up', answer: null })]
       )
       await postMessage(session.band_room_id, nextAgent, nextQuestion).catch(() => {})
-      // Update active agent in session
       await pool.query(`UPDATE sessions SET active_agent = $1 WHERE id = $2`, [nextAgent, session.id])
     }
 
-    res.json({
-      question: nextQuestion,
-      activeAgent: nextAgent,
-      sidebarEvents,
-      sessionEnded,
-    })
+    res.json({ question: nextQuestion, activeAgent: nextAgent, sidebarEvents, sessionEnded })
   } catch (err) {
-    console.error('Turn error:', err.message, err.stack)
+    logErr('POST /sessions/:id/turn', err)
     res.status(500).json({ error: 'Failed to process turn' })
   }
 })
@@ -370,6 +361,7 @@ router.post('/:id/end', requireAuth, async (req, res) => {
     )
     res.json({ ok: true })
   } catch (err) {
+    logErr('POST /sessions/:id/end', err)
     res.status(500).json({ error: 'Failed to end session' })
   }
 })
@@ -377,22 +369,6 @@ router.post('/:id/end', requireAuth, async (req, res) => {
 // POST /sessions/:id/debrief — run debrief generation: all 4 agents nominate, Red Team arbitrates
 router.post('/:id/debrief', requireAuth, async (req, res) => {
   try {
-    // Ensure debriefs table exists
-    await pool.query(`
-      CREATE TABLE IF NOT EXISTS session_debriefs (
-        id SERIAL PRIMARY KEY,
-        session_id INTEGER NOT NULL UNIQUE,
-        verdict TEXT,
-        weaknesses JSONB,
-        gaps JSONB,
-        recommended_focus JSONB,
-        session_stats JSONB,
-        end_reason TEXT,
-        created_at TIMESTAMPTZ DEFAULT NOW()
-      )
-    `)
-
-    // Load session + pitch
     const { rows: sessions } = await pool.query(
       `SELECT s.*, p.name, p.one_liner, p.funding_amount, p.equity_percent,
               p.implied_valuation, p.stage, p.industry, p.traction, p.revenue_model,
@@ -407,39 +383,34 @@ router.post('/:id/debrief', requireAuth, async (req, res) => {
     const session = sessions[0]
     const pitch = buildPitch(session)
 
-    // Return cached debrief if already generated
     const { rows: existing } = await pool.query(
       `SELECT * FROM session_debriefs WHERE session_id = $1`, [session.id]
     )
     if (existing.length) return res.json(existing[0])
 
-    // Load all session events
     const { rows: events } = await pool.query(
       `SELECT * FROM session_events WHERE session_id = $1 ORDER BY created_at ASC`,
       [session.id]
     )
 
-    // Load remaining queues
     const { rows: queues } = await pool.query(
       `SELECT agent, questions FROM agent_queues WHERE session_id = $1`, [session.id]
     )
     const agentQueues = {}
     queues.forEach(q => { agentQueues[q.agent] = q.questions || [] })
 
-    // Determine end reason
     const endEvent = events.find(e => e.event_type === 'SESSION_END')
     const endReason = endEvent?.payload?.reason || 'queues_exhausted'
 
-    // Unasked questions per agent (remaining queue items at session end)
     const gaps = {}
     for (const [agent, queue] of Object.entries(agentQueues)) {
       if (queue.length > 0) gaps[agent] = queue
     }
     const hasGaps = Object.values(gaps).some(q => q.length > 0)
 
-    // ── Step 1: All 4 agents nominate weaknesses in parallel ──────────────────
     const sidebarEvents = []
 
+    console.log('[/debrief] all 4 agents nominating...')
     const [invNoms, compNoms, rtNoms, custNoms] = await Promise.all([
       AGENTS.investor.nominateWeaknesses(pitch, events, agentQueues.investor || []),
       AGENTS.competitor.nominateWeaknesses(pitch, events, agentQueues.competitor || []),
@@ -447,7 +418,6 @@ router.post('/:id/debrief', requireAuth, async (req, res) => {
       AGENTS.customer.nominateWeaknesses(pitch, events, agentQueues.customer || []),
     ])
 
-    // Post nomination events to Band sidebar
     const nominations = [
       { agent: 'investor',   nominations: invNoms },
       { agent: 'competitor', nominations: compNoms },
@@ -466,10 +436,9 @@ router.post('/:id/debrief', requireAuth, async (req, res) => {
       sidebarEvents.push({ type: 'NOMINATION', agent, payload })
     }
 
-    // ── Step 2: Red Team arbitrates ───────────────────────────────────────────
+    console.log('[/debrief] red_team arbitrating...')
     const arbitration = await AGENTS.red_team.arbitrateDebrief(nominations, pitch)
 
-    // Post final debrief event to Band
     await postEvent(session.band_room_id, 'red_team', 'FINAL_DEBRIEF', {
       ranked: arbitration.weaknesses?.map(w => w.title),
     }).catch(() => {})
@@ -484,7 +453,6 @@ router.post('/:id/debrief', requireAuth, async (req, res) => {
       payload: { ranked: arbitration.weaknesses?.map(w => w.title) },
     })
 
-    // ── Step 3: Session stats (for judge sidebar) ─────────────────────────────
     const exchangeCount = events.filter(e => e.event_type === 'FOUNDER_RESPONSE').length
     const questionsByAgent = {}
     for (const agent of AGENT_ORDER) {
@@ -497,16 +465,14 @@ router.post('/:id/debrief', requireAuth, async (req, res) => {
     for (const [agent, queue] of Object.entries(agentQueues)) {
       unaskedByAgent[agent] = queue.length
     }
-    const deflectionCount = events.filter(e => e.event_type === 'DEFLECTION').length
     const sessionStats = {
       exchanges: exchangeCount,
       questionsByAgent,
       hardestAgent,
       unaskedByAgent,
-      deflections: deflectionCount,
+      deflections: events.filter(e => e.event_type === 'DEFLECTION').length,
     }
 
-    // ── Step 4: Persist debrief ───────────────────────────────────────────────
     const { rows: saved } = await pool.query(
       `INSERT INTO session_debriefs
          (session_id, verdict, weaknesses, gaps, recommended_focus, session_stats, end_reason)
@@ -525,7 +491,7 @@ router.post('/:id/debrief', requireAuth, async (req, res) => {
 
     res.json({ ...saved[0], sidebarEvents })
   } catch (err) {
-    console.error('Debrief error:', err.message, err.stack)
+    logErr('POST /sessions/:id/debrief', err)
     res.status(500).json({ error: 'Failed to generate debrief' })
   }
 })
@@ -533,21 +499,6 @@ router.post('/:id/debrief', requireAuth, async (req, res) => {
 // GET /sessions/:id/debrief — return stored debrief
 router.get('/:id/debrief', requireAuth, async (req, res) => {
   try {
-    // Ensure table exists before querying
-    await pool.query(`
-      CREATE TABLE IF NOT EXISTS session_debriefs (
-        id SERIAL PRIMARY KEY,
-        session_id INTEGER NOT NULL UNIQUE,
-        verdict TEXT,
-        weaknesses JSONB,
-        gaps JSONB,
-        recommended_focus JSONB,
-        session_stats JSONB,
-        end_reason TEXT,
-        created_at TIMESTAMPTZ DEFAULT NOW()
-      )
-    `)
-    // Verify ownership via session
     const { rows: sessions } = await pool.query(
       `SELECT s.id, s.round_number, s.status, p.name, p.one_liner, p.funding_amount, p.equity_percent
        FROM sessions s JOIN projects p ON p.id = s.project_id
@@ -564,6 +515,7 @@ router.get('/:id/debrief', requireAuth, async (req, res) => {
 
     res.json({ ...debriefs[0], session })
   } catch (err) {
+    logErr('GET /sessions/:id/debrief', err)
     res.status(500).json({ error: 'Failed to fetch debrief' })
   }
 })
@@ -588,12 +540,11 @@ router.get('/:id/history', requireAuth, async (req, res) => {
       [req.params.id]
     )
 
-    // Pair each AGENT_QUESTION with the FOUNDER_RESPONSE that followed it
     const exchanges = []
     let pending = null
     for (const ev of events) {
       if (ev.event_type === 'AGENT_QUESTION') {
-        if (pending) exchanges.push({ ...pending, answer: null }) // unanswered question
+        if (pending) exchanges.push({ ...pending, answer: null })
         pending = {
           question: ev.payload.question,
           topic: ev.payload.topic,
@@ -609,11 +560,11 @@ router.get('/:id/history', requireAuth, async (req, res) => {
         pending = null
       }
     }
-    if (pending) exchanges.push(pending) // trailing unanswered question
+    if (pending) exchanges.push(pending)
 
     res.json({ session: sessions[0], exchanges })
   } catch (err) {
-    console.error('History error:', err.message)
+    logErr('GET /sessions/:id/history', err)
     res.status(500).json({ error: 'Failed to fetch session history' })
   }
 })
@@ -628,20 +579,6 @@ router.post('/:id/outcome', requireAuth, async (req, res) => {
     )
     if (!sessions.length) return res.status(404).json({ error: 'Session not found' })
 
-    // Upsert outcome — one per session
-    await pool.query(`
-      CREATE TABLE IF NOT EXISTS session_outcomes (
-        id SERIAL PRIMARY KEY,
-        session_id INTEGER NOT NULL UNIQUE,
-        meeting_happened BOOLEAN,
-        outcome TEXT,
-        main_objection TEXT,
-        caught_off_guard TEXT,
-        wished_prepared TEXT,
-        investor_feedback TEXT,
-        created_at TIMESTAMPTZ DEFAULT NOW()
-      )
-    `)
     await pool.query(
       `INSERT INTO session_outcomes
          (session_id, meeting_happened, outcome, main_objection, caught_off_guard, wished_prepared, investor_feedback)
@@ -656,14 +593,13 @@ router.post('/:id/outcome', requireAuth, async (req, res) => {
       [req.params.id, meeting_happened ?? true, outcome || null, main_objection || null,
        caught_off_guard || null, wished_prepared || null, investor_feedback || null]
     )
-    // Mark session as outcome logged
     await pool.query(
       `UPDATE sessions SET outcome_logged = true WHERE id = $1`,
       [req.params.id]
     )
     res.json({ ok: true })
   } catch (err) {
-    console.error('Outcome error:', err.message)
+    logErr('POST /sessions/:id/outcome', err)
     res.status(500).json({ error: 'Failed to save outcome' })
   }
 })
@@ -671,7 +607,6 @@ router.post('/:id/outcome', requireAuth, async (req, res) => {
 // GET /sessions/:id/deepgram-token — issue a short-lived Deepgram API key for client STT
 router.get('/:id/deepgram-token', requireAuth, async (req, res) => {
   try {
-    // Verify session belongs to user
     const { rows } = await pool.query(
       `SELECT id FROM sessions WHERE id = $1 AND user_id = $2`,
       [req.params.id, req.user.id]
@@ -695,11 +630,10 @@ router.get('/:id/deepgram-token', requireAuth, async (req, res) => {
     )
     res.json({ key: response.data.key })
   } catch (err) {
-    // If Deepgram key creation fails (e.g. key not configured), fall back to passing the main key
-    // This is acceptable for dev/demo — in prod you'd want scoped keys
     if (process.env.DEEPGRAM_API_KEY) {
       return res.json({ key: process.env.DEEPGRAM_API_KEY })
     }
+    logErr('GET /sessions/:id/deepgram-token', err)
     res.status(500).json({ error: 'Deepgram not configured' })
   }
 })
@@ -730,24 +664,24 @@ function buildPitch(session) {
   }
 }
 
-function pickNextAgent(agentQueues) {
-  // Find agent (other than current) with highest-priority (lowest priority number) queued item
-  let best = null
-  let bestPriority = Infinity
+function pickNextAgent(agentQueues, justAsked) {
+  // Rotate through agents in order, skipping the one that just asked.
+  // Among agents with queued items, prefer the one that comes next in rotation
+  // after justAsked — so no single agent monopolises when all have equal priority.
+  const startIdx = justAsked ? (AGENT_ORDER.indexOf(justAsked) + 1) % AGENT_ORDER.length : 0
 
-  for (const agentName of AGENT_ORDER) {
+  // First pass: find next agent in rotation order that has a queued item
+  for (let i = 0; i < AGENT_ORDER.length; i++) {
+    const agentName = AGENT_ORDER[(startIdx + i) % AGENT_ORDER.length]
+    if (agentName === justAsked) continue
     const queue = agentQueues[agentName] || []
-    if (queue.length > 0) {
-      const topPriority = queue[0].priority ?? 3
-      if (topPriority < bestPriority) {
-        bestPriority = topPriority
-        best = agentName
-      }
-    }
+    if (queue.length > 0) return agentName
   }
 
-  // If current agent still has items and no other agent has higher priority, stay
-  return best
+  // All non-active agents exhausted — allow justAsked to continue if it still has items
+  if (justAsked && (agentQueues[justAsked] || []).length > 0) return justAsked
+
+  return null
 }
 
 module.exports = router

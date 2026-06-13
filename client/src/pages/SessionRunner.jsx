@@ -42,14 +42,22 @@ export default function SessionRunner() {
   const [submitting, setSubmitting] = useState(false)
   const [starting, setStarting] = useState(false)
 
-  // Text fallback input
+  // Session elapsed timer
+  const [elapsed, setElapsed] = useState(0)
+  const timerRef = useRef(null)
+
+  // Speech: toggle mode, 90s auto-stop
   const [textInput, setTextInput] = useState('')
   const [inputMode, setInputMode] = useState('speech') // 'speech' | 'text'
+  const micTimerRef = useRef(null)
+  const micCountdownRef = useRef(null)
+  const MIC_MAX_SECONDS = 90
+  const [micSecsLeft, setMicSecsLeft] = useState(MIC_MAX_SECONDS)
 
   const chatEndRef = useRef(null)
   const sidebarEndRef = useRef(null)
 
-  const { transcript, interim, listening, error: micError, start: startMic, stop: stopMic, reset: resetTranscript } = useDeepgram(id)
+  const { transcript, interim, listening, ready, error: micError, start: startMic, stop: stopMic, reset: resetTranscript } = useDeepgram(id)
 
   // Auto-scroll both panels
   useEffect(() => { chatEndRef.current?.scrollIntoView({ behavior: 'smooth' }) }, [messages])
@@ -59,6 +67,18 @@ export default function SessionRunner() {
   useEffect(() => {
     if (inputMode === 'speech') setTextInput(transcript + (interim ? ' ' + interim : ''))
   }, [transcript, interim, inputMode])
+
+  // Start elapsed timer once session is active, stop when ended
+  useEffect(() => {
+    if (!loading && !sessionEnded && !starting) {
+      timerRef.current = setInterval(() => setElapsed(s => s + 1), 1000)
+    }
+    return () => clearInterval(timerRef.current)
+  }, [loading, sessionEnded, starting])
+
+  useEffect(() => {
+    if (sessionEnded) clearInterval(timerRef.current)
+  }, [sessionEnded])
 
   // Load session + existing state on mount
   useEffect(() => {
@@ -70,29 +90,38 @@ export default function SessionRunner() {
         setActiveAgent(s.active_agent || 'investor')
         setSessionEnded(s.status === 'completed')
 
-        // Reconstruct chat from events
+        // Seed elapsed timer from session start time
+        if (s.created_at && s.status !== 'completed') {
+          const secs = Math.floor((Date.now() - new Date(s.created_at).getTime()) / 1000)
+          setElapsed(Math.max(0, secs))
+        }
+
+        // Reconstruct chat: pair each AGENT_QUESTION with the FOUNDER_RESPONSE that follows it
         const chat = []
         const sidebar = []
-        for (const ev of (events || [])) {
+        const evList = events || []
+
+        for (let i = 0; i < evList.length; i++) {
+          const ev = evList[i]
           if (ev.event_type === 'AGENT_QUESTION') {
             chat.push({ role: 'agent', agent: ev.agent, text: ev.payload.question, id: ev.id })
-            if (ev.payload.answer) {
-              chat.push({ role: 'founder', text: ev.payload.answer, id: `ans-${ev.id}` })
+            // Look ahead for the next FOUNDER_RESPONSE
+            const next = evList[i + 1]
+            if (next?.event_type === 'FOUNDER_RESPONSE') {
+              chat.push({ role: 'founder', text: next.payload.answer, id: `ans-${next.id}` })
+              i++ // skip the response event — already consumed
             }
-          } else if (ev.event_type === 'FOUNDER_RESPONSE') {
-            // Already handled inline with AGENT_QUESTION above
           } else if (['WEAK_POINT','STRONG_POINT','CONTRADICTION','DEFLECTION','QUEUE_UPDATE','FOLLOW_UP','PASS_CONTROL'].includes(ev.event_type)) {
             sidebar.push({ type: ev.event_type, agent: ev.agent, payload: ev.payload, ts: ev.created_at })
           }
         }
+
         setMessages(chat)
         setSidebarEvents(sidebar)
 
         if (chat.length === 0 && s.status !== 'completed') {
-          // Session hasn't started — kick off first question
           startSession()
         } else if (chat.length > 0) {
-          // Resume — last question is still the current one if no answer yet
           const lastMsg = chat[chat.length - 1]
           if (lastMsg.role === 'agent') setCurrentQuestion(lastMsg.text)
         }
@@ -129,11 +158,47 @@ export default function SessionRunner() {
     ])
   }
 
+  function formatTime(s) {
+    const m = Math.floor(s / 60).toString().padStart(2, '0')
+    const sec = (s % 60).toString().padStart(2, '0')
+    return `${m}:${sec}`
+  }
+
+  function handleMicToggle() {
+    if (listening) {
+      stopMic()
+      clearTimeout(micTimerRef.current)
+      clearInterval(micCountdownRef.current)
+      setMicSecsLeft(MIC_MAX_SECONDS)
+      // Auto-submit whatever was transcribed
+      setTimeout(() => {
+        handleSubmitRef.current?.()
+      }, 100) // small delay to let transcript state settle
+    } else {
+      startMic()
+      setMicSecsLeft(MIC_MAX_SECONDS)
+      micCountdownRef.current = setInterval(() => {
+        setMicSecsLeft(s => {
+          if (s <= 1) {
+            clearInterval(micCountdownRef.current)
+            stopMic()
+            setTimeout(() => { handleSubmitRef.current?.() }, 100)
+            return 0
+          }
+          return s - 1
+        })
+      }, 1000)
+    }
+  }
+
+  // Stable ref so the timeout callbacks always call the latest handleSubmit
+  const handleSubmitRef = useRef(null)
+
   const handleSubmit = useCallback(async () => {
     const answer = textInput.trim()
     if (!answer || !currentQuestion || submitting || sessionEnded) return
 
-    if (listening) stopMic()
+    if (listening) { stopMic(); clearInterval(micCountdownRef.current); setMicSecsLeft(MIC_MAX_SECONDS) }
 
     setSubmitting(true)
     setMessages(prev => [...prev, { role: 'founder', text: answer, id: `f-${Date.now()}` }])
@@ -175,6 +240,9 @@ export default function SessionRunner() {
     setSubmitting(false)
   }, [textInput, currentQuestion, submitting, sessionEnded, listening, stopMic, resetTranscript, id, activeAgent])
 
+  // Keep ref current so timeout callbacks in handleMicToggle always call the latest version
+  handleSubmitRef.current = handleSubmit
+
   const triggerDebrief = useCallback(async () => {
     setGeneratingDebrief(true)
     try {
@@ -195,9 +263,20 @@ export default function SessionRunner() {
   }
 
   if (loading) return <div className="session-loading"><div className="session-loading-text">Preparing the room...</div></div>
-  if (error) return <div className="session-loading"><div className="session-error">{error}</div></div>
 
   const agentMeta = AGENT_META[activeAgent] || AGENT_META.investor
+
+  // Full-page error only when session itself couldn't be loaded at all
+  if (error && !session) {
+    return (
+      <div className="session-loading">
+        <div className="session-error">{error}</div>
+        <button className="session-retry-btn" onClick={() => { setError(null); setLoading(true); window.location.reload() }}>
+          Retry
+        </button>
+      </div>
+    )
+  }
 
   return (
     <div className="session-layout">
@@ -208,9 +287,12 @@ export default function SessionRunner() {
             <span className="session-logo">FORGE<span className="accent">.</span></span>
             <span className="session-round">{session?.name} — Round {session?.round_number}</span>
           </div>
-          {!sessionEnded && (
-            <button className="session-end-btn" onClick={handleEndSession}>End Session</button>
-          )}
+          <div className="session-header-right">
+            {!sessionEnded && <span className="session-timer">{formatTime(elapsed)}</span>}
+            {!sessionEnded && (
+              <button className="session-end-btn" onClick={handleEndSession}>End Session</button>
+            )}
+          </div>
         </div>
 
         <div className="session-chat-body">
@@ -218,6 +300,18 @@ export default function SessionRunner() {
             <div className="chat-loading">
               <div className="chat-loading-dots"><span/><span/><span/></div>
               <p>The panel is reviewing your pitch...</p>
+            </div>
+          )}
+
+          {error && !starting && (
+            <div className="session-inline-error">
+              <span>{error}</span>
+              <button
+                className="session-retry-btn"
+                onClick={() => { setError(null); startSession() }}
+              >
+                Retry
+              </button>
             </div>
           )}
 
@@ -233,6 +327,13 @@ export default function SessionRunner() {
               <h3>{generatingDebrief ? 'Generating debrief...' : 'Session Complete'}</h3>
               <p>{generatingDebrief ? 'All four agents are submitting nominations. Red Team is arbitrating.' : 'Navigating to your debrief...'}</p>
               <div className="chat-loading-dots" style={{ margin: '0 auto' }}><span/><span/><span/></div>
+            </div>
+          )}
+
+          {submitting && !sessionEnded && (
+            <div className="agent-thinking">
+              <div className="agent-thinking-dots"><span/><span/><span/></div>
+              <span>Panel evaluating response...</span>
             </div>
           )}
 
@@ -257,15 +358,12 @@ export default function SessionRunner() {
               {inputMode === 'speech' && (
                 <button
                   className={`mic-btn ${listening ? 'active' : ''}`}
-                  onMouseDown={startMic}
-                  onMouseUp={stopMic}
-                  onTouchStart={startMic}
-                  onTouchEnd={stopMic}
+                  onClick={handleMicToggle}
                   disabled={submitting}
-                  title="Hold to speak"
+                  title={listening ? 'Stop recording' : 'Start recording'}
                 >
-                  {listening ? '🔴' : '🎤'}
-                  <span>{listening ? 'Release to stop' : 'Hold to speak'}</span>
+                  {listening ? '⏹' : '⏺'}
+                  <span>{listening ? `${micSecsLeft}s` : (ready ? 'Record' : '...')}</span>
                 </button>
               )}
 
@@ -274,9 +372,9 @@ export default function SessionRunner() {
                   className="session-textarea"
                   placeholder={inputMode === 'speech' ? 'Transcript will appear here...' : 'Type your answer...'}
                   value={textInput}
-                  onChange={e => setTextInput(e.target.value)}
+                  onChange={e => { if (inputMode === 'text') setTextInput(e.target.value) }}
                   onKeyDown={handleKeyDown}
-                  readOnly={inputMode === 'speech' && listening}
+                  readOnly={inputMode === 'speech'}
                   rows={3}
                 />
                 {micError && <div className="mic-error">{micError}</div>}
@@ -285,7 +383,7 @@ export default function SessionRunner() {
               <button
                 className="session-submit-btn"
                 onClick={handleSubmit}
-                disabled={!textInput.trim() || submitting || !currentQuestion}
+                disabled={!textInput.trim() || submitting || !currentQuestion || listening}
               >
                 {submitting ? <span className="submitting-dots"><span/><span/><span/></span> : 'Submit →'}
               </button>
@@ -304,6 +402,7 @@ export default function SessionRunner() {
           <span className="sidebar-title">Agent Activity</span>
           <span className="sidebar-live-dot" />
           <span className="sidebar-live-label">LIVE</span>
+          <span className="sidebar-demo-note">Demo only</span>
         </div>
 
         <div className="sidebar-agent-status">

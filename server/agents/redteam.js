@@ -1,5 +1,6 @@
 const axios = require('axios')
 const { postEvent } = require('./bandService')
+const { withRetry } = require('./llmRetry')
 
 const AIML_BASE = 'https://api.aimlapi.com/v1'
 const MODEL = process.env.REDTEAM_MODEL || 'gpt-4o-mini'
@@ -20,6 +21,11 @@ function buildSystemPrompt(pitch, priorDebriefContext) {
 ROLE: Attack this pitch on logical gaps, internal contradictions, flawed assumptions, and execution risk.
 You find what doesn't add up. You catch the founder in contradictions across everything they've said.
 You are relentless, precise, and forensic. You do not encourage. You dismantle.
+If the founder gives a vague, evasive, or self-contradicting answer — name the problem directly in one sentence before your next question. Examples:
+- "You said distribution is your biggest risk, then described a plan with no distribution budget."
+- "That contradicts what you said about runway two questions ago."
+- "That's not an answer — that's a hope dressed up as a strategy."
+Then follow immediately with your next question.
 
 PITCH:
 Company: ${pitch.name} — ${pitch.one_liner}
@@ -40,7 +46,7 @@ RULES:
 - TAM claims: demand methodology. "Large market" is not a number — how was it calculated?
 - Contradictions: if the founder said something that doesn't add up, name it explicitly.
 - Do not hallucinate numbers. Only reference what is in the pitch.
-- Max 2 sentences per question.`
+- Max 3 sentences total (pushback + question).`
 }
 
 // ─── INITIALISE QUEUE FROM PITCH ─────────────────────────────────────────────
@@ -235,7 +241,7 @@ Output JSON only — no commentary outside the JSON:
 
 // ─── AIML API CALL ───────────────────────────────────────────────────────────
 async function callAIML(messages, maxTokens = 150) {
-  const res = await axios.post(
+  const res = await withRetry(() => axios.post(
     `${AIML_BASE}/chat/completions`,
     {
       model: MODEL,
@@ -249,7 +255,7 @@ async function callAIML(messages, maxTokens = 150) {
         'Content-Type': 'application/json',
       },
     }
-  )
+  ))
   return res.data.choices[0].message.content.trim()
 }
 

@@ -783,6 +783,31 @@ footer {
 }
 .session-loading-text { color: var(--text-muted); font-size: 15px; letter-spacing: 0.05em; }
 .session-error { color: var(--red); font-size: 15px; }
+.session-retry-btn {
+  margin-top: 12px;
+  padding: 8px 20px;
+  background: transparent;
+  border: 1px solid var(--red);
+  color: var(--red);
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 14px;
+  transition: background 0.15s;
+}
+.session-retry-btn:hover { background: rgba(255,71,71,0.12); }
+.session-inline-error {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 16px;
+  padding: 12px 16px;
+  background: rgba(255,71,71,0.08);
+  border: 1px solid rgba(255,71,71,0.3);
+  border-radius: 8px;
+  color: var(--red);
+  font-size: 14px;
+}
+.session-inline-error .session-retry-btn { margin-top: 0; flex-shrink: 0; }
 
 .session-layout {
   display: grid;
@@ -808,6 +833,17 @@ footer {
   border-bottom: 1px solid var(--border);
   flex-shrink: 0;
   background: var(--bg);
+}
+.session-header-right {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.session-timer {
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-muted);
+  letter-spacing: 0.05em;
 }
 
 .session-chat-title {
@@ -903,6 +939,26 @@ footer {
 }
 
 /* ── Session ended ── */
+.agent-thinking {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 16px;
+  color: var(--text-muted);
+  font-size: 13px;
+  font-style: italic;
+}
+.agent-thinking-dots { display: flex; gap: 5px; }
+.agent-thinking-dots span {
+  width: 6px; height: 6px;
+  background: var(--accent);
+  border-radius: 50%;
+  animation: bounce 1.2s infinite;
+}
+.agent-thinking-dots span:nth-child(1) { animation-delay: 0s; }
+.agent-thinking-dots span:nth-child(2) { animation-delay: 0.2s; }
+.agent-thinking-dots span:nth-child(3) { animation-delay: 0.4s; }
+
 .session-ended-msg {
   align-self: center;
   text-align: center;
@@ -1064,6 +1120,7 @@ footer {
   margin-left: auto;
 }
 .sidebar-live-label { font-size: 10px; font-weight: 700; color: var(--red); letter-spacing: 0.08em; }
+.sidebar-demo-note { margin-left: auto; font-size: 10px; color: #e8ff47; opacity: 0.7; font-style: italic; }
 
 .sidebar-agent-status {
   display: flex;

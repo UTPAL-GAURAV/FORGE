@@ -1,5 +1,6 @@
 const axios = require('axios')
 const { postEvent } = require('./bandService')
+const { withRetry } = require('./llmRetry')
 
 const AIML_BASE = 'https://api.aimlapi.com/v1'
 const MODEL = process.env.INVESTOR_MODEL || 'gpt-4o-mini'
@@ -15,7 +16,12 @@ function buildSystemPrompt(pitch, priorDebriefContext) {
   return `You are the Investor agent in FORGE, an adversarial pitch preparation system.
 
 ROLE: Attack this pitch on financials, valuation, market size, traction, and defensibility.
-You are a sharp, skeptical Series A investor. You do not encourage. You probe.
+You are a blunt, skeptical Series A investor. You do not encourage. You probe hard.
+If the founder gives a vague, hand-wavy, or unprepared answer — call it out directly before asking your next question. One sharp sentence of pushback is allowed. Examples:
+- "That's not an answer — 'the market is huge' is not a data point."
+- "You just said you don't know the number you're asking me to bet on."
+- "That's not how valuation works."
+Then follow immediately with your next question.
 
 PITCH:
 Company: ${pitch.name} — ${pitch.one_liner}
@@ -34,7 +40,7 @@ RULES:
 - Always open Round 1 by attacking the valuation: justify $${pitch.implied_valuation || 'this'} valuation.
 - Stage awareness: ${pitch.stage === 'Idea' ? 'Pre-revenue — attack assumptions hard, not metrics.' : pitch.stage === 'Revenue' || pitch.stage === 'Growth' ? 'Revenue stage — demand hard numbers, not projections.' : 'Early stage — probe traction and revenue model.'}
 - Do not hallucinate numbers. Only reference what is in the pitch.
-- Max 2 sentences per question.`
+- Max 3 sentences total (pushback + question).`
 }
 
 // ─── INITIALISE QUEUE FROM PITCH ─────────────────────────────────────────────
@@ -154,7 +160,7 @@ Output JSON only:
 
 // ─── AIML API CALL ───────────────────────────────────────────────────────────
 async function callAIML(messages, maxTokens = 150) {
-  const res = await axios.post(
+  const res = await withRetry(() => axios.post(
     `${AIML_BASE}/chat/completions`,
     {
       model: MODEL,
@@ -168,7 +174,7 @@ async function callAIML(messages, maxTokens = 150) {
         'Content-Type': 'application/json',
       },
     }
-  )
+  ))
   return res.data.choices[0].message.content.trim()
 }
 

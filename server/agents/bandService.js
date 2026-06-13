@@ -10,42 +10,40 @@ const agents = {
 }
 
 function headers(apiKey) {
-  return { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' }
+  return { 'X-API-Key': apiKey, 'Content-Type': 'application/json' }
 }
 
-// Create a new Band chat room (called as Investor agent — the session host)
+// Create a new Band chat room (called as Investor agent)
 async function createRoom(projectName) {
   const res = await axios.post(
     `${BAND_BASE}/chats`,
-    { name: `FORGE | ${projectName}` },
+    { chat: {} },
     { headers: headers(agents.investor.key) }
   )
-  return res.data.id
+  return res.data.data.id
 }
 
-// Add all 4 agents to the room
+const sleep = ms => new Promise(resolve => setTimeout(resolve, ms))
+
+// Add one agent at a time to the room (Band requires individual participant adds)
 async function addAgentsToRoom(roomId) {
-  const agentUuids = [
-    agents.competitor.uuid,
-    agents.red_team.uuid,
-    agents.customer.uuid,
-  ]
-  await axios.post(
-    `${BAND_BASE}/chats/${roomId}/participants`,
-    { agent_ids: agentUuids },
-    { headers: headers(agents.investor.key) }
-  )
+  const others = [agents.competitor.uuid, agents.red_team.uuid, agents.customer.uuid]
+  for (const uuid of others) {
+    await axios.post(
+      `${BAND_BASE}/chats/${roomId}/participants`,
+      { participant: { participant_id: uuid } },
+      { headers: headers(agents.investor.key) }
+    ).catch(() => {}) // ignore if already a participant
+    await sleep(300)
+  }
 }
 
-// Post the pitch context brief to the room as a system event
+// Post the pitch context brief as a structured event
 async function postPitchBrief(roomId, project) {
   const brief = buildBrief(project)
   await axios.post(
     `${BAND_BASE}/chats/${roomId}/events`,
-    {
-      type: 'PITCH_BRIEF',
-      payload: brief,
-    },
+    { event: { content: JSON.stringify({ type: 'PITCH_BRIEF', payload: brief }), message_type: 'task' } },
     { headers: headers(agents.investor.key) }
   )
 }
@@ -56,19 +54,22 @@ async function postEvent(roomId, agentName, eventType, payload) {
   if (!agentKey) throw new Error(`Unknown agent: ${agentName}`)
   await axios.post(
     `${BAND_BASE}/chats/${roomId}/events`,
-    { type: eventType, agent: agentName, payload },
+    { event: { content: JSON.stringify({ type: eventType, agent: agentName, payload }), message_type: 'task' } },
     { headers: headers(agentKey) }
   )
 }
 
-// Post a visible message to the founder
-async function postMessage(roomId, agentName, text, mentionHandle) {
+// Post a visible question message — mention all other agents so they receive it
+async function postMessage(roomId, agentName, text) {
   const agentKey = agents[agentName]?.key
   if (!agentKey) throw new Error(`Unknown agent: ${agentName}`)
-  const content = mentionHandle ? `@${mentionHandle} ${text}` : text
+  // Mention the other three agents so they see the message
+  const otherUuids = Object.entries(agents)
+    .filter(([name]) => name !== agentName)
+    .map(([, a]) => ({ id: a.uuid }))
   await axios.post(
     `${BAND_BASE}/chats/${roomId}/messages`,
-    { content },
+    { message: { content: text, mentions: otherUuids } },
     { headers: headers(agentKey) }
   )
 }

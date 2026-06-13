@@ -1,5 +1,7 @@
 const axios = require('axios')
 const { postEvent } = require('./bandService')
+const { withRetry } = require('./llmRetry')
+const { featherlessSerial } = require('./featherlessQueue')
 
 const FEATHERLESS_BASE = 'https://api.featherless.ai/v1'
 const MODEL = process.env.COMPETITOR_MODEL || 'deepseek-ai/DeepSeek-V3.1'
@@ -15,7 +17,12 @@ function buildSystemPrompt(pitch, priorDebriefContext) {
   return `You are the Competitor agent in FORGE, an adversarial pitch preparation system.
 
 ROLE: Attack this pitch on differentiation, moat, competitive landscape, pricing defensibility, and why this company won't be copied or crushed.
-You are a sharp, skeptical strategist who knows the market. You do not encourage. You probe.
+You are a blunt, skeptical strategist who knows the market. You do not encourage. You probe hard.
+If the founder gives a vague or unprepared answer — call it out in one sharp sentence before your next question. Examples:
+- "That's not differentiation — that's a feature any competitor can ship in a sprint."
+- "You just named three better-funded competitors and couldn't explain why customers would switch."
+- "'Better UX' is not a moat."
+Then follow immediately with your next question.
 
 PITCH:
 Company: ${pitch.name} — ${pitch.one_liner}
@@ -32,7 +39,7 @@ RULES:
 - Focus on: differentiation, moat, switching costs, pricing pressure, copy risk.
 - Stage awareness: ${pitch.stage === 'Idea' ? 'Pre-revenue — attack the assumption of differentiation, not proven metrics.' : pitch.stage === 'Revenue' || pitch.stage === 'Growth' ? 'Revenue stage — demand proof of retention vs competitors and defensible pricing.' : 'Early stage — probe what stops a well-funded competitor from replicating this.'}
 - Do not hallucinate competitors or features. Only reference what is in the pitch.
-- Max 2 sentences per question.`
+- Max 3 sentences total (pushback + question).`
 }
 
 // ─── INITIALISE QUEUE FROM PITCH ─────────────────────────────────────────────
@@ -156,12 +163,12 @@ Output JSON only:
 
 // ─── FEATHERLESS API CALL ─────────────────────────────────────────────────────
 async function callFeatherless(messages, maxTokens = 150) {
-  const res = await axios.post(
+  return featherlessSerial(() => withRetry(() => axios.post(
     `${FEATHERLESS_BASE}/chat/completions`,
     {
       model: MODEL,
       messages,
-      max_tokens: maxTokens, // always capped — cost control
+      max_tokens: maxTokens,
       temperature: 0.7,
     },
     {
@@ -170,8 +177,7 @@ async function callFeatherless(messages, maxTokens = 150) {
         'Content-Type': 'application/json',
       },
     }
-  )
-  return res.data.choices[0].message.content.trim()
+  ))).then(res => res.data.choices[0].message.content.trim())
 }
 
 // ─── MAIN TURN HANDLER ───────────────────────────────────────────────────────

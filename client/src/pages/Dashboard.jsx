@@ -556,7 +556,7 @@ function NewProjectModal({ onClose, onCreated }) {
               </div>
               <div className="form-group">
                 <label>One-liner <span className="required">*</span></label>
-                <input className="form-input" placeholder="What do you do, for who?" value={form.one_liner} onChange={e => set('one_liner', e.target.value)} />
+                <input className="form-input" placeholder="e.g. AI expense tracking for finance teams" value={form.one_liner} onChange={e => set('one_liner', e.target.value)} />
               </div>
               <div className="form-row">
                 <div className="form-group">

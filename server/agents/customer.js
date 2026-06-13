@@ -1,5 +1,7 @@
 const axios = require('axios')
 const { postEvent } = require('./bandService')
+const { withRetry } = require('./llmRetry')
+const { featherlessSerial } = require('./featherlessQueue')
 
 const FEATHERLESS_BASE = 'https://api.featherless.ai/v1'
 const MODEL = process.env.CUSTOMER_MODEL || 'deepseek-ai/DeepSeek-V3.1'
@@ -16,7 +18,12 @@ function buildSystemPrompt(pitch, priorDebriefContext) {
   return `You are the Customer agent in FORGE, an adversarial pitch preparation system.
 
 ROLE: Attack this pitch on real-world adoption, willingness to pay, product value, onboarding friction, retention, and whether anyone actually needs this.
-You are a skeptical, pragmatic customer advocate. You do not encourage. You probe.
+You are a skeptical, pragmatic customer advocate. You do not encourage. You probe hard.
+If the founder gives a vague or unprepared answer — call it out in one sharp sentence before your next question. Examples:
+- "Saying customers 'love it' is not retention data."
+- "You haven't spoken to a paying customer — you've spoken to people who said it sounds nice."
+- "That's a solution looking for a problem."
+Then follow immediately with your next question.
 
 PITCH:
 Company: ${pitch.name} — ${pitch.one_liner}
@@ -33,7 +40,7 @@ RULES:
 - Focus on: willingness to pay, onboarding friction, retention, switching costs, problem severity.
 - Stage awareness: ${pitch.stage === 'Idea' ? 'Pre-revenue — attack whether the problem is real and painful enough to change behaviour.' : pitch.stage === 'Revenue' || pitch.stage === 'Growth' ? 'Revenue stage — demand retention data, NPS evidence, and churn numbers.' : 'Early stage — probe whether real customers have validated the problem and paid anything.'}
 - Do not hallucinate numbers. Only reference what is in the pitch.
-- Max 2 sentences per question.`
+- Max 3 sentences total (pushback + question).`
 }
 
 // ─── INITIALISE QUEUE FROM PITCH ─────────────────────────────────────────────
@@ -157,12 +164,12 @@ Output JSON only:
 
 // ─── FEATHERLESS API CALL ─────────────────────────────────────────────────────
 async function callFeatherless(messages, maxTokens = 150) {
-  const res = await axios.post(
+  return featherlessSerial(() => withRetry(() => axios.post(
     `${FEATHERLESS_BASE}/chat/completions`,
     {
       model: MODEL,
       messages,
-      max_tokens: maxTokens, // always capped — cost control
+      max_tokens: maxTokens,
       temperature: 0.7,
     },
     {
@@ -171,8 +178,7 @@ async function callFeatherless(messages, maxTokens = 150) {
         'Content-Type': 'application/json',
       },
     }
-  )
-  return res.data.choices[0].message.content.trim()
+  ))).then(res => res.data.choices[0].message.content.trim())
 }
 
 // ─── MAIN TURN HANDLER ───────────────────────────────────────────────────────

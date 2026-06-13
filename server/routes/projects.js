@@ -3,6 +3,12 @@ const router = express.Router()
 const pool = require('../db/pool')
 const { requireAuth } = require('../middleware/requireAuth')
 
+function logErr(label, err) {
+  console.error(`[${label}]`, err.message)
+  if (err.response?.data) console.error(`[${label}] API response:`, JSON.stringify(err.response.data))
+  if (err.stack) console.error(err.stack)
+}
+
 // GET all projects for current user
 router.get('/', requireAuth, async (req, res) => {
   try {
@@ -30,7 +36,7 @@ router.get('/', requireAuth, async (req, res) => {
     )
     res.json(rows)
   } catch (err) {
-    console.error(err)
+    logErr('GET /projects', err)
     res.status(500).json({ error: 'Failed to fetch projects' })
   }
 })
@@ -69,7 +75,7 @@ router.post('/', requireAuth, async (req, res) => {
     )
     res.status(201).json(rows[0])
   } catch (err) {
-    console.error(err)
+    logErr('POST /projects', err)
     res.status(500).json({ error: 'Failed to create project' })
   }
 })
@@ -80,6 +86,7 @@ router.delete('/:id', requireAuth, async (req, res) => {
     await pool.query('DELETE FROM projects WHERE id = $1 AND user_id = $2', [req.params.id, req.user.id])
     res.json({ success: true })
   } catch (err) {
+    logErr('DELETE /projects/:id', err)
     res.status(500).json({ error: 'Failed to delete project' })
   }
 })

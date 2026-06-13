@@ -41,6 +41,43 @@ app.use('/api/auth', authRoutes);
 app.use('/api/projects', projectRoutes);
 app.use('/api/sessions', sessionRoutes);
 
-app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
-});
+async function ensureTables() {
+  await pool.query(`ALTER TABLE sessions ADD COLUMN IF NOT EXISTS outcome_logged BOOLEAN DEFAULT false`)
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS session_debriefs (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      session_id UUID NOT NULL UNIQUE REFERENCES sessions(id) ON DELETE CASCADE,
+      verdict TEXT,
+      weaknesses JSONB,
+      gaps JSONB,
+      recommended_focus JSONB,
+      session_stats JSONB,
+      end_reason TEXT,
+      created_at TIMESTAMPTZ DEFAULT NOW()
+    )
+  `)
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS session_outcomes (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      session_id UUID NOT NULL UNIQUE REFERENCES sessions(id) ON DELETE CASCADE,
+      meeting_happened BOOLEAN,
+      outcome TEXT,
+      main_objection TEXT,
+      caught_off_guard TEXT,
+      wished_prepared TEXT,
+      investor_feedback TEXT,
+      created_at TIMESTAMPTZ DEFAULT NOW()
+    )
+  `)
+}
+
+ensureTables()
+  .then(() => {
+    app.listen(PORT, () => {
+      console.log(`Server running on port ${PORT}`)
+    })
+  })
+  .catch(err => {
+    console.error('Failed to initialise tables:', err.message)
+    process.exit(1)
+  })
