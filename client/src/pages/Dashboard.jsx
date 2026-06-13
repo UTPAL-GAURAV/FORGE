@@ -37,6 +37,7 @@ export default function Dashboard() {
   const [showNewProject, setShowNewProject] = useState(false)
   const [historySession, setHistorySession] = useState(null) // { id, name, round }
   const [outcomeSession, setOutcomeSession] = useState(null) // session object
+  const [detailProject, setDetailProject] = useState(null) // project object
 
   const reload = useCallback(() => {
     fetch(`${API_URL}/api/projects`, { credentials: 'include' })
@@ -93,6 +94,7 @@ export default function Dashboard() {
                   project={p}
                   onViewHistory={(s) => setHistorySession(s)}
                   onLogOutcome={(s) => setOutcomeSession(s)}
+                  onViewDetail={(p) => setDetailProject(p)}
                   onReload={reload}
                 />
               ))}
@@ -116,6 +118,9 @@ export default function Dashboard() {
           onSaved={() => { setOutcomeSession(null); reload() }}
         />
       )}
+      {detailProject && (
+        <ProjectDetailModal project={detailProject} onClose={() => setDetailProject(null)} />
+      )}
     </div>
   )
 }
@@ -131,7 +136,7 @@ function EmptyState({ onNew }) {
   )
 }
 
-function ProjectCard({ project, onViewHistory, onLogOutcome, onReload }) {
+function ProjectCard({ project, onViewHistory, onLogOutcome, onViewDetail, onReload }) {
   const [open, setOpen] = useState(true)
   const [starting, setStarting] = useState(false)
   const navigate = useNavigate()
@@ -172,6 +177,11 @@ function ProjectCard({ project, onViewHistory, onLogOutcome, onReload }) {
           {sessions.length > 0 && (
             <span className="project-round-badge">{completedCount}/{sessions.length} rounds</span>
           )}
+          <button
+            className="project-info-btn"
+            onClick={e => { e.stopPropagation(); onViewDetail(project) }}
+            title="View pitch details"
+          >ⓘ</button>
           <span className="project-chevron">{open ? '▲' : '▼'}</span>
         </div>
       </button>
@@ -655,6 +665,46 @@ function NewProjectModal({ onClose, onCreated }) {
           <button className="btn-primary" onClick={handleSubmit} disabled={!canSubmit || saving}>
             {saving ? 'Creating...' : 'Create Project →'}
           </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+const DETAIL_LABELS = {
+  name: 'Company Name', one_liner: 'One-line Description',
+  funding_amount: 'Funding Ask', equity_percent: 'Equity Offered', implied_valuation: 'Implied Valuation',
+  industry: 'Industry / Sector', stage: 'Stage', use_of_funds: 'Use of Funds',
+  problem: 'Problem', solution: 'Solution', revenue_model: 'Revenue Model',
+  traction: 'Traction', key_metrics: 'Key Metrics', target_customer: 'Target Customer',
+  tam: 'Market Size (TAM/SAM)', competitors: 'Competitors', team: 'Team & Roles',
+  prior_funding: 'Prior Funding', known_risks: 'Known Risks',
+}
+
+function ProjectDetailModal({ project, onClose }) {
+  return (
+    <div className="modal-overlay" onClick={onClose}>
+      <div className="modal-box modal-box--wide" onClick={e => e.stopPropagation()}>
+        <div className="modal-header">
+          <h2 className="modal-title">📁 {project.name}</h2>
+          <button className="modal-close" onClick={onClose}>✕</button>
+        </div>
+        <div className="project-detail-grid">
+          {Object.entries(DETAIL_LABELS).map(([key, label]) => {
+            const val = project[key]
+            if (!val && val !== 0) return null
+            return (
+              <div key={key} className="project-detail-row">
+                <div className="project-detail-label">{label}</div>
+                <div className="project-detail-value">
+                  {key === 'funding_amount' ? `$${Number(val).toLocaleString()}`
+                    : key === 'equity_percent' ? `${val}%`
+                    : key === 'implied_valuation' ? `$${Number(val).toLocaleString()}`
+                    : val}
+                </div>
+              </div>
+            )
+          })}
         </div>
       </div>
     </div>

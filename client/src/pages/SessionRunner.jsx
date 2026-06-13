@@ -37,6 +37,8 @@ export default function SessionRunner() {
 
   const [activeAgent, setActiveAgent] = useState('investor')
   const [currentQuestion, setCurrentQuestion] = useState(null)
+  const [currentTopic, setCurrentTopic] = useState('valuation')
+  const [currentDepth, setCurrentDepth] = useState(0)
   const [sessionEnded, setSessionEnded] = useState(false)
   const [generatingDebrief, setGeneratingDebrief] = useState(false)
   const [submitting, setSubmitting] = useState(false)
@@ -96,20 +98,28 @@ export default function SessionRunner() {
           setElapsed(Math.max(0, secs))
         }
 
-        // Reconstruct chat: pair each AGENT_QUESTION with the FOUNDER_RESPONSE that follows it
+        // Build a lookup of FOUNDER_RESPONSE events indexed by position,
+        // then pair each AGENT_QUESTION with the first FOUNDER_RESPONSE that follows it.
+        const evList = events || []
         const chat = []
         const sidebar = []
-        const evList = events || []
+
+        // Track which FOUNDER_RESPONSE indices have been consumed
+        const consumedResponses = new Set()
 
         for (let i = 0; i < evList.length; i++) {
           const ev = evList[i]
           if (ev.event_type === 'AGENT_QUESTION') {
             chat.push({ role: 'agent', agent: ev.agent, text: ev.payload.question, id: ev.id })
-            // Look ahead for the next FOUNDER_RESPONSE
-            const next = evList[i + 1]
-            if (next?.event_type === 'FOUNDER_RESPONSE') {
-              chat.push({ role: 'founder', text: next.payload.answer, id: `ans-${next.id}` })
-              i++ // skip the response event — already consumed
+            // Find the next unconsumed FOUNDER_RESPONSE anywhere after this question
+            for (let j = i + 1; j < evList.length; j++) {
+              if (evList[j].event_type === 'FOUNDER_RESPONSE' && !consumedResponses.has(j)) {
+                consumedResponses.add(j)
+                chat.push({ role: 'founder', text: evList[j].payload.answer, id: `ans-${evList[j].id}` })
+                break
+              }
+              // Stop looking if we hit another AGENT_QUESTION — this question was unanswered
+              if (evList[j].event_type === 'AGENT_QUESTION') break
             }
           } else if (['WEAK_POINT','STRONG_POINT','CONTRADICTION','DEFLECTION','QUEUE_UPDATE','FOLLOW_UP','PASS_CONTROL'].includes(ev.event_type)) {
             sidebar.push({ type: ev.event_type, agent: ev.agent, payload: ev.payload, ts: ev.created_at })
@@ -143,6 +153,8 @@ export default function SessionRunner() {
       if (!r.ok) throw new Error(data.error)
       setCurrentQuestion(data.question)
       setActiveAgent(data.activeAgent)
+      setCurrentTopic(data.topic || 'valuation')
+      setCurrentDepth(data.depth || 0)
       setMessages([{ role: 'agent', agent: data.activeAgent, text: data.question, id: 'q0' }])
       if (data.sidebarEvents) pushSidebar(data.sidebarEvents)
     } catch (e) {
@@ -164,18 +176,20 @@ export default function SessionRunner() {
     return `${m}:${sec}`
   }
 
+  const [micStarting, setMicStarting] = useState(false)
+
   function handleMicToggle() {
     if (listening) {
       stopMic()
       clearTimeout(micTimerRef.current)
       clearInterval(micCountdownRef.current)
       setMicSecsLeft(MIC_MAX_SECONDS)
-      // Auto-submit whatever was transcribed
       setTimeout(() => {
         handleSubmitRef.current?.()
-      }, 100) // small delay to let transcript state settle
+      }, 100)
     } else {
-      startMic()
+      setMicStarting(true)
+      startMic().finally(() => setMicStarting(false))
       setMicSecsLeft(MIC_MAX_SECONDS)
       micCountdownRef.current = setInterval(() => {
         setMicSecsLeft(s => {
@@ -210,7 +224,7 @@ export default function SessionRunner() {
         method: 'POST',
         credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ founderResponse: answer, lastQuestion: currentQuestion, activeAgent }),
+        body: JSON.stringify({ founderResponse: answer, lastQuestion: currentQuestion, lastTopic: currentTopic, lastDepth: currentDepth, activeAgent }),
       })
       const data = await r.json()
       if (!r.ok) throw new Error(data.error)
@@ -224,6 +238,8 @@ export default function SessionRunner() {
       } else if (data.question) {
         setCurrentQuestion(data.question)
         setActiveAgent(data.activeAgent)
+        setCurrentTopic(data.topic || 'general')
+        setCurrentDepth(data.depth || 0)
         setMessages(prev => [...prev, {
           role: 'agent',
           agent: data.activeAgent,
@@ -238,7 +254,7 @@ export default function SessionRunner() {
     }
 
     setSubmitting(false)
-  }, [textInput, currentQuestion, submitting, sessionEnded, listening, stopMic, resetTranscript, id, activeAgent])
+  }, [textInput, currentQuestion, currentTopic, currentDepth, submitting, sessionEnded, listening, stopMic, resetTranscript, id, activeAgent])
 
   // Keep ref current so timeout callbacks in handleMicToggle always call the latest version
   handleSubmitRef.current = handleSubmit
@@ -362,8 +378,8 @@ export default function SessionRunner() {
                   disabled={submitting}
                   title={listening ? 'Stop recording' : 'Start recording'}
                 >
-                  {listening ? '⏹' : '⏺'}
-                  <span>{listening ? `${micSecsLeft}s` : (ready ? 'Record' : '...')}</span>
+                  <div className="mic-icon" />
+                  <span>{listening ? `${micSecsLeft}s` : micStarting ? 'Starting...' : 'Record'}</span>
                 </button>
               )}
 

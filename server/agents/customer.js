@@ -62,13 +62,13 @@ ${pitch.key_metrics ? `Metrics: ${pitch.key_metrics}` : ''}`
   const res = await callFeatherless([{ role: 'user', content: prompt }], 400)
   try {
     const questions = JSON.parse(res)
-    return questions.sort((a, b) => a.priority - b.priority)
+    return questions.map(q => ({ ...q, depth: 0 })).sort((a, b) => a.priority - b.priority)
   } catch {
     // Fallback queue if parse fails
     return [
-      { question: 'Walk me through the last conversation where a customer agreed to pay for this — what exactly did they say?', topic: 'willingness_to_pay', priority: 1 },
-      { question: 'What does the onboarding look like — how long before a new customer sees value?', topic: 'onboarding', priority: 2 },
-      { question: 'Why would someone switch from what they use today — what is the switching cost?', topic: 'switching_cost', priority: 3 },
+      { question: 'Walk me through the last conversation where a customer agreed to pay for this — what exactly did they say?', topic: 'willingness_to_pay', priority: 1, depth: 0 },
+      { question: 'What does the onboarding look like — how long before a new customer sees value?', topic: 'onboarding', priority: 2, depth: 0 },
+      { question: 'Why would someone switch from what they use today — what is the switching cost?', topic: 'switching_cost', priority: 3, depth: 0 },
     ]
   }
 }
@@ -82,29 +82,26 @@ function getFirstQuestion(pitch) {
 }
 
 // ─── EVALUATE FOUNDER RESPONSE ───────────────────────────────────────────────
-// Called after every founder answer — all agents evaluate in parallel
-// Returns: { annotation, queueUpdates, followUp, passControl }
-async function evaluateResponse(pitch, founderResponse, lastQuestion, currentQueue, allAnnotations) {
-  const annotationContext = allAnnotations.length
-    ? `\nOTHER AGENTS FOUND:\n${allAnnotations.map(a => `- ${a.agent}: ${a.type} — ${a.topic}`).join('\n')}`
-    : ''
-
+// Called after every founder answer — all agents evaluate in parallel (isolated, Shark Tank model)
+// Returns: { annotation, satisfied, followUp, newQueueItems }
+async function evaluateResponse(pitch, founderResponse, lastQuestion, lastTopic, currentDepth, currentQueue) {
   const prompt = `You are the Customer agent evaluating a founder's response.
 
 QUESTION ASKED: "${lastQuestion}"
 FOUNDER ANSWERED: "${founderResponse}"
-${annotationContext}
+TOPIC DEPTH: This topic ("${lastTopic}") has been followed up ${currentDepth} time(s) already.
 
 Respond with JSON only:
 {
   "satisfied": true/false,
   "annotation": { "type": "WEAK_POINT|STRONG_POINT|CONTRADICTION|DEFLECTION", "topic": "...", "confidence": "high|medium|low", "note": "one sentence max" },
   "followUp": "follow-up question if not satisfied, or null",
-  "newQueueItems": [{ "question": "...", "topic": "...", "priority": 1-5 }]
+  "newQueueItems": [{ "question": "...", "topic": "...", "priority": 2, "depth": 0 }]
 }
 
 Rules:
 - satisfied=true only if the answer is specific, credible, with real examples — not hypothetical
+- If topic depth >= 2, set satisfied=true and followUp=null — topic is closed, move on
 - followUp must be ONE sharp question or null
 - newQueueItems: add questions this response opened up (max 2)`
 

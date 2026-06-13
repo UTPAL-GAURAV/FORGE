@@ -183,19 +183,22 @@ router.post('/:id/start', requireAuth, async (req, res) => {
     await postMessage(session.band_room_id, 'investor', firstQ)
 
     const sidebarEvent = { type: 'AGENT_QUESTION', agent: 'investor', payload: { question: firstQ, topic: 'valuation' } }
-    res.json({ question: firstQ, activeAgent: 'investor', sidebarEvents: [sidebarEvent] })
+    res.json({ question: firstQ, activeAgent: 'investor', topic: 'valuation', depth: 0, sidebarEvents: [sidebarEvent] })
   } catch (err) {
     logErr('POST /sessions/:id/start', err)
     res.status(500).json({ error: 'Failed to start session' })
   }
 })
 
-// POST /sessions/:id/turn — submit founder response, get next question
+// POST /sessions/:id/turn — submit founder response, get next question immediately, evaluate in background
 router.post('/:id/turn', requireAuth, async (req, res) => {
-  const { founderResponse, lastQuestion, activeAgent } = req.body
+  const { founderResponse, lastQuestion, lastTopic, lastDepth, activeAgent } = req.body
   if (!founderResponse || !lastQuestion || !activeAgent) {
     return res.status(400).json({ error: 'founderResponse, lastQuestion, activeAgent required' })
   }
+
+  // Stash context for background eval (must outlive the try/catch)
+  let bgEvalArgs = null
 
   try {
     const { rows: sessions } = await pool.query(
@@ -212,12 +215,14 @@ router.post('/:id/turn', requireAuth, async (req, res) => {
     const session = sessions[0]
     const pitch = buildPitch(session)
 
+    // Persist founder response
     await pool.query(
       `INSERT INTO session_events (session_id, event_type, agent, payload)
        VALUES ($1, 'FOUNDER_RESPONSE', NULL, $2)`,
       [session.id, JSON.stringify({ answer: founderResponse, toQuestion: lastQuestion, toAgent: activeAgent })]
     )
 
+    // Load queues
     const { rows: queues } = await pool.query(
       `SELECT agent, questions FROM agent_queues WHERE session_id = $1`,
       [session.id]
@@ -225,123 +230,60 @@ router.post('/:id/turn', requireAuth, async (req, res) => {
     const agentQueues = {}
     queues.forEach(q => { agentQueues[q.agent] = q.questions })
 
-    const { rows: recentAnnotations } = await pool.query(
-      `SELECT payload FROM session_events
-       WHERE session_id = $1 AND event_type IN ('WEAK_POINT','STRONG_POINT','CONTRADICTION','DEFLECTION')
-       ORDER BY created_at DESC LIMIT 20`,
+    // Count questions asked so far per agent (for 40% share cap)
+    const { rows: questionCounts } = await pool.query(
+      `SELECT agent, COUNT(*) as count FROM session_events WHERE session_id = $1 AND event_type = 'AGENT_QUESTION' GROUP BY agent`,
       [session.id]
     )
-    const allAnnotations = recentAnnotations.map(r => r.payload)
+    const totalAsked = questionCounts.reduce((sum, r) => sum + parseInt(r.count), 0)
+    const askedByAgent = {}
+    questionCounts.forEach(r => { askedByAgent[r.agent] = parseInt(r.count) })
 
+    // Pick next agent + question from queue immediately (no LLM, deterministic)
+    const { nextAgent, nextQuestion } = pickNextQuestion(agentQueues, activeAgent, askedByAgent, totalAsked)
+
+    let sessionEnded = false
     const sidebarEvents = []
 
-    // ── Step 1: Active agent evaluates first — determines follow-up or pass ──
-    const activeEvalResult = await (AGENTS[activeAgent].evaluateResponse
-      ? AGENTS[activeAgent].evaluateResponse(pitch, founderResponse, lastQuestion, agentQueues[activeAgent] || [], allAnnotations)
-      : Promise.resolve(null)
-    ).catch(err => { logErr(`turn activeEval[${activeAgent}]`, err); return null })
+    // Capture topic/depth of the next question BEFORE popping it from the queue
+    const nextTopic = nextAgent ? (agentQueues[nextAgent][0]?.topic || 'general') : null
+    const nextDepth = nextAgent ? (agentQueues[nextAgent][0]?.depth ?? 0) : 0
 
-    // Persist active agent annotation + queue update immediately
-    if (activeEvalResult?.annotation) {
-      await pool.query(
-        `INSERT INTO session_events (session_id, event_type, agent, payload) VALUES ($1, $2, $3, $4)`,
-        [session.id, activeEvalResult.annotation.type, activeAgent, JSON.stringify({ ...activeEvalResult.annotation, agent: activeAgent })]
-      )
-      await postEvent(session.band_room_id, activeAgent, activeEvalResult.annotation.type, { ...activeEvalResult.annotation, agent: activeAgent }).catch(() => {})
-      sidebarEvents.push({ type: activeEvalResult.annotation.type, agent: activeAgent, payload: activeEvalResult.annotation })
-    }
-    if (activeEvalResult?.newQueueItems?.length) {
-      const existing = agentQueues[activeAgent] || []
-      const updated = [...existing, ...activeEvalResult.newQueueItems].sort((a, b) => a.priority - b.priority)
-      await pool.query(`UPDATE agent_queues SET questions = $1, updated_at = NOW() WHERE session_id = $2 AND agent = $3`, [JSON.stringify(updated), session.id, activeAgent])
-      agentQueues[activeAgent] = updated
-      await postEvent(session.band_room_id, activeAgent, 'QUEUE_UPDATE', { added: activeEvalResult.newQueueItems }).catch(() => {})
-      sidebarEvents.push({ type: 'QUEUE_UPDATE', agent: activeAgent, payload: { added: activeEvalResult.newQueueItems } })
-    }
-
-    // ── Step 2: Active agent decides next question — before other agents run ──
-    let nextQuestion = null
-    let nextAgent = activeAgent
-    let sessionEnded = false
-
-    if (activeEvalResult && !activeEvalResult.satisfied && activeEvalResult.followUp) {
-      nextQuestion = activeEvalResult.followUp
-      await postEvent(session.band_room_id, activeAgent, 'FOLLOW_UP', { question: activeEvalResult.followUp }).catch(() => {})
-      sidebarEvents.push({ type: 'FOLLOW_UP', agent: activeAgent, payload: { question: activeEvalResult.followUp } })
+    if (!nextAgent) {
+      sessionEnded = true
+      await pool.query(`UPDATE sessions SET status = 'completed', completed_at = NOW() WHERE id = $1`, [session.id])
+      sidebarEvents.push({ type: 'SESSION_COMPLETE', agent: 'system', payload: { message: 'All queues exhausted' } })
+      await postEvent(session.band_room_id, activeAgent, 'PASS_CONTROL', { reason: 'exhausted' }).catch(() => {})
     } else {
-      await postEvent(session.band_room_id, activeAgent, 'PASS_CONTROL', { reason: 'satisfied' }).catch(() => {})
-      sidebarEvents.push({ type: 'PASS_CONTROL', agent: activeAgent, payload: { reason: 'satisfied' } })
-
-      const nextAgentName = pickNextAgent(agentQueues, activeAgent)
-      if (!nextAgentName) {
-        sessionEnded = true
-        await pool.query(`UPDATE sessions SET status = 'completed', completed_at = NOW() WHERE id = $1`, [session.id])
-        sidebarEvents.push({ type: 'SESSION_COMPLETE', agent: 'system', payload: { message: 'All queues exhausted' } })
-      } else {
-        nextAgent = nextAgentName
-        const queue = agentQueues[nextAgentName] || []
-        if (queue.length > 0) {
-          nextQuestion = queue[0].question
-          const remaining = queue.slice(1)
-          await pool.query(`UPDATE agent_queues SET questions = $1, updated_at = NOW() WHERE session_id = $2 AND agent = $3`, [JSON.stringify(remaining), session.id, nextAgentName])
-          agentQueues[nextAgentName] = remaining
-        }
-      }
-    }
-
-    // ── Step 3: Other agents evaluate in background (annotations + queue only) ──
-    const otherAgents = AGENT_ORDER.filter(a => a !== activeAgent)
-    const otherResults = await Promise.allSettled(
-      otherAgents.map(agentName =>
-        AGENTS[agentName].evaluateResponse
-          ? AGENTS[agentName].evaluateResponse(pitch, founderResponse, lastQuestion, agentQueues[agentName] || [], allAnnotations)
-          : Promise.resolve(null)
-      )
-    )
-
-    otherResults.forEach((r, i) => {
-      if (r.status === 'rejected') logErr(`turn evaluateResponse[${otherAgents[i]}]`, r.reason)
-    })
-
-    await Promise.all(
-      otherAgents.map(async (agentName, idx) => {
-        const result = otherResults[idx]
-        if (result.status !== 'fulfilled' || !result.value) return
-        const evaluation = result.value
-
-        if (evaluation.annotation) {
-          await pool.query(
-            `INSERT INTO session_events (session_id, event_type, agent, payload) VALUES ($1, $2, $3, $4)`,
-            [session.id, evaluation.annotation.type, agentName, JSON.stringify({ ...evaluation.annotation, agent: agentName })]
-          )
-          await postEvent(session.band_room_id, agentName, evaluation.annotation.type, { ...evaluation.annotation, agent: agentName }).catch(() => {})
-          sidebarEvents.push({ type: evaluation.annotation.type, agent: agentName, payload: evaluation.annotation })
-        }
-        if (evaluation.newQueueItems?.length) {
-          const existing = agentQueues[agentName] || []
-          const updated = [...existing, ...evaluation.newQueueItems].sort((a, b) => a.priority - b.priority)
-          await pool.query(`UPDATE agent_queues SET questions = $1, updated_at = NOW() WHERE session_id = $2 AND agent = $3`, [JSON.stringify(updated), session.id, agentName])
-          agentQueues[agentName] = updated
-          await postEvent(session.band_room_id, agentName, 'QUEUE_UPDATE', { added: evaluation.newQueueItems }).catch(() => {})
-          sidebarEvents.push({ type: 'QUEUE_UPDATE', agent: agentName, payload: { added: evaluation.newQueueItems } })
-        }
-      })
-    )
-
-    if (nextQuestion) {
+      const remaining = agentQueues[nextAgent].slice(1)
       await pool.query(
-        `INSERT INTO session_events (session_id, event_type, agent, payload)
-         VALUES ($1, 'AGENT_QUESTION', $2, $3)`,
-        [session.id, nextAgent, JSON.stringify({ question: nextQuestion, topic: 'follow_up', answer: null })]
+        `UPDATE agent_queues SET questions = $1, updated_at = NOW() WHERE session_id = $2 AND agent = $3`,
+        [JSON.stringify(remaining), session.id, nextAgent]
+      )
+      await pool.query(`UPDATE sessions SET active_agent = $1 WHERE id = $2`, [nextAgent, session.id])
+      await pool.query(
+        `INSERT INTO session_events (session_id, event_type, agent, payload) VALUES ($1, 'AGENT_QUESTION', $2, $3)`,
+        [session.id, nextAgent, JSON.stringify({ question: nextQuestion, topic: nextTopic, depth: nextDepth, answer: null })]
       )
       await postMessage(session.band_room_id, nextAgent, nextQuestion).catch(() => {})
-      await pool.query(`UPDATE sessions SET active_agent = $1 WHERE id = $2`, [nextAgent, session.id])
+      await postEvent(session.band_room_id, activeAgent, 'PASS_CONTROL', { reason: 'next_queued' }).catch(() => {})
+      sidebarEvents.push({ type: 'PASS_CONTROL', agent: activeAgent, payload: { reason: 'next_queued' } })
+      sidebarEvents.push({ type: 'AGENT_QUESTION', agent: nextAgent, payload: { question: nextQuestion, topic: nextTopic } })
     }
 
-    res.json({ question: nextQuestion, activeAgent: nextAgent, sidebarEvents, sessionEnded })
+    // Stash everything needed for background eval before responding
+    bgEvalArgs = { session, pitch, founderResponse, lastQuestion, lastTopic: lastTopic || 'general', lastDepth: lastDepth ?? 0, activeAgent, agentQueues, band_room_id: session.band_room_id }
+
+    res.json({ question: nextQuestion || null, activeAgent: nextAgent || activeAgent, topic: nextTopic || 'general', depth: nextDepth, sidebarEvents, sessionEnded })
+
   } catch (err) {
     logErr('POST /sessions/:id/turn', err)
-    res.status(500).json({ error: 'Failed to process turn' })
+    if (!res.headersSent) res.status(500).json({ error: 'Failed to process turn' })
+  }
+
+  // Background evaluation — fully outside try/catch so it never touches res
+  if (bgEvalArgs) {
+    runBackgroundEvaluation(bgEvalArgs).catch(err => logErr('background eval', err))
   }
 })
 
@@ -664,24 +606,95 @@ function buildPitch(session) {
   }
 }
 
-function pickNextAgent(agentQueues, justAsked) {
-  // Rotate through agents in order, skipping the one that just asked.
-  // Among agents with queued items, prefer the one that comes next in rotation
-  // after justAsked — so no single agent monopolises when all have equal priority.
+// Pick the next agent + question from queues using rotation + 40% share cap
+function pickNextQuestion(agentQueues, justAsked, askedByAgent, totalAsked) {
+  const MAX_SHARE = 0.4
+
   const startIdx = justAsked ? (AGENT_ORDER.indexOf(justAsked) + 1) % AGENT_ORDER.length : 0
 
-  // First pass: find next agent in rotation order that has a queued item
+  // First pass: rotation order, respecting share cap (only enforced after 5 questions)
   for (let i = 0; i < AGENT_ORDER.length; i++) {
     const agentName = AGENT_ORDER[(startIdx + i) % AGENT_ORDER.length]
-    if (agentName === justAsked) continue
     const queue = agentQueues[agentName] || []
-    if (queue.length > 0) return agentName
+    if (!queue.length) continue
+    const share = totalAsked > 0 ? (askedByAgent[agentName] || 0) / totalAsked : 0
+    if (share >= MAX_SHARE && totalAsked >= 5) continue // only enforce cap after 5 questions
+    return { nextAgent: agentName, nextQuestion: queue[0].question }
   }
 
-  // All non-active agents exhausted — allow justAsked to continue if it still has items
-  if (justAsked && (agentQueues[justAsked] || []).length > 0) return justAsked
+  // Second pass: cap relaxed (all other agents exhausted)
+  for (let i = 0; i < AGENT_ORDER.length; i++) {
+    const agentName = AGENT_ORDER[(startIdx + i) % AGENT_ORDER.length]
+    const queue = agentQueues[agentName] || []
+    if (queue.length) return { nextAgent: agentName, nextQuestion: queue[0].question }
+  }
 
-  return null
+  return { nextAgent: null, nextQuestion: null }
+}
+
+// Background evaluation — runs after response sent, all 4 agents evaluate independently
+// Updates queues with follow-ups and newly discovered questions (Shark Tank model — no cross-agent context)
+async function runBackgroundEvaluation({ session, pitch, founderResponse, lastQuestion, lastTopic, lastDepth, activeAgent, agentQueues, band_room_id }) {
+  const results = await Promise.allSettled(
+    AGENT_ORDER.map(agentName =>
+      AGENTS[agentName].evaluateResponse
+        ? AGENTS[agentName].evaluateResponse(
+            pitch,
+            founderResponse,
+            lastQuestion,
+            agentName === activeAgent ? lastTopic : (agentQueues[agentName]?.[0]?.topic || 'general'),
+            agentName === activeAgent ? lastDepth : 0,
+            agentQueues[agentName] || []
+          )
+        : Promise.resolve(null)
+    )
+  )
+
+  await Promise.all(AGENT_ORDER.map(async (agentName, idx) => {
+    const r = results[idx]
+    if (r.status !== 'fulfilled' || !r.value) {
+      if (r.status === 'rejected') logErr(`bgEval[${agentName}]`, r.reason)
+      return
+    }
+    const eval_ = r.value
+
+    // Persist annotation to DB and post to Band sidebar
+    if (eval_.annotation) {
+      await pool.query(
+        `INSERT INTO session_events (session_id, event_type, agent, payload) VALUES ($1, $2, $3, $4)`,
+        [session.id, eval_.annotation.type, agentName, JSON.stringify({ ...eval_.annotation, agent: agentName })]
+      )
+      await postEvent(band_room_id, agentName, eval_.annotation.type, { ...eval_.annotation, agent: agentName }).catch(() => {})
+    }
+
+    // Reload this agent's queue fresh from DB (may have changed since we last read it)
+    const { rows } = await pool.query(
+      `SELECT questions FROM agent_queues WHERE session_id = $1 AND agent = $2`,
+      [session.id, agentName]
+    )
+    let queue = rows[0]?.questions || []
+
+    // Active agent: prepend follow-up at P1 if not satisfied and depth < 2
+    if (agentName === activeAgent && !eval_.satisfied && eval_.followUp && lastDepth < 2) {
+      const followUpItem = { question: eval_.followUp, topic: lastTopic, priority: 1, depth: lastDepth + 1 }
+      queue = [followUpItem, ...queue].sort((a, b) => a.priority - b.priority)
+      await postEvent(band_room_id, agentName, 'QUEUE_UPDATE', { added: [followUpItem] }).catch(() => {})
+    }
+
+    // All agents: append newly discovered queue items (P2 minimum, depth 0)
+    if (eval_.newQueueItems?.length) {
+      const newItems = eval_.newQueueItems.map(item => ({ ...item, priority: Math.max(item.priority ?? 2, 2), depth: 0 }))
+      queue = [...queue, ...newItems].sort((a, b) => a.priority - b.priority)
+      await postEvent(band_room_id, agentName, 'QUEUE_UPDATE', { added: newItems }).catch(() => {})
+    }
+
+    if ((agentName === activeAgent && !eval_.satisfied && eval_.followUp && lastDepth < 2) || eval_.newQueueItems?.length) {
+      await pool.query(
+        `UPDATE agent_queues SET questions = $1, updated_at = NOW() WHERE session_id = $2 AND agent = $3`,
+        [JSON.stringify(queue), session.id, agentName]
+      )
+    }
+  }))
 }
 
 module.exports = router

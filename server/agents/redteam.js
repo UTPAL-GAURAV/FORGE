@@ -73,49 +73,38 @@ ${knownRisksLine}`
   const res = await callAIML([{ role: 'user', content: prompt }], 400)
   try {
     const questions = JSON.parse(res)
-    return questions.sort((a, b) => a.priority - b.priority)
+    return questions.map(q => ({ ...q, depth: 0 })).sort((a, b) => a.priority - b.priority)
   } catch {
     // Fallback queue if parse fails
     return [
-      { question: `What's the single biggest assumption your entire business model rests on — and what happens if it's wrong?`, topic: 'core_assumption', priority: 1 },
-      { question: 'How did you calculate your TAM — walk me through the methodology, not just the number?', topic: 'tam_methodology', priority: 2 },
-      { question: 'What execution step have you underestimated the most, and why haven\'t you solved it yet?', topic: 'execution_risk', priority: 3 },
+      { question: `What's the single biggest assumption your entire business model rests on — and what happens if it's wrong?`, topic: 'core_assumption', priority: 1, depth: 0 },
+      { question: 'How did you calculate your TAM — walk me through the methodology, not just the number?', topic: 'tam_methodology', priority: 2, depth: 0 },
+      { question: 'What execution step have you underestimated the most, and why haven\'t you solved it yet?', topic: 'execution_risk', priority: 3, depth: 0 },
     ]
   }
 }
 
 // ─── EVALUATE FOUNDER RESPONSE ───────────────────────────────────────────────
-// Called after every founder answer — all agents evaluate in parallel
-// Returns: { annotation, queueUpdates, followUp, passControl }
-async function evaluateResponse(pitch, founderResponse, lastQuestion, currentQueue, allAnnotations) {
-  const annotationContext = allAnnotations.length
-    ? `\nOTHER AGENTS FOUND:\n${allAnnotations.map(a => `- ${a.agent}: ${a.type} — ${a.topic}`).join('\n')}`
-    : ''
-
-  // Surface any contradictions flagged by other agents so Red Team can escalate
-  const contradictions = allAnnotations.filter(a => a.type === 'CONTRADICTION')
-  const contradictionAlert = contradictions.length
-    ? `\nCONTRADICTIONS FLAGGED BY OTHER AGENTS (Red Team must probe these):\n${contradictions.map(c => `- ${c.agent}: ${c.note}`).join('\n')}`
-    : ''
-
+// Called after every founder answer — all agents evaluate in parallel (isolated, Shark Tank model)
+// Returns: { annotation, satisfied, followUp, newQueueItems }
+async function evaluateResponse(pitch, founderResponse, lastQuestion, lastTopic, currentDepth, currentQueue) {
   const prompt = `You are the Red Team agent evaluating a founder's response.
 
 QUESTION ASKED: "${lastQuestion}"
 FOUNDER ANSWERED: "${founderResponse}"
-${annotationContext}
-${contradictionAlert}
+TOPIC DEPTH: This topic ("${lastTopic}") has been followed up ${currentDepth} time(s) already.
 
 Respond with JSON only:
 {
   "satisfied": true/false,
   "annotation": { "type": "WEAK_POINT|STRONG_POINT|CONTRADICTION|DEFLECTION", "topic": "...", "confidence": "high|medium|low", "note": "one sentence max" },
   "followUp": "follow-up question if not satisfied, or null",
-  "newQueueItems": [{ "question": "...", "topic": "...", "priority": 1-5 }]
+  "newQueueItems": [{ "question": "...", "topic": "...", "priority": 2, "depth": 0 }]
 }
 
 Rules:
 - satisfied=true only if the answer is specific, credible, logically consistent, and complete
-- If the answer contradicts something flagged by another agent, set type to CONTRADICTION in annotation
+- If topic depth >= 2, set satisfied=true and followUp=null — topic is closed, move on
 - followUp must be ONE sharp question or null
 - newQueueItems: add questions this response opened up (max 2)`
 

@@ -59,44 +59,41 @@ ${pitch.tam ? `Market: ${pitch.tam}` : ''}`
   const res = await callFeatherless([{ role: 'user', content: prompt }], 400)
   try {
     const questions = JSON.parse(res)
-    return questions.sort((a, b) => a.priority - b.priority)
+    return questions.map(q => ({ ...q, depth: 0 })).sort((a, b) => a.priority - b.priority)
   } catch {
     // Fallback queue if parse fails
     const competitorRef = pitch.competitors
       ? `your named competitors (${pitch.competitors})`
       : 'an established player in this space'
     return [
-      { question: `What specifically stops ${competitorRef} from building exactly what you're building in the next 6 months?`, topic: 'copy_risk', priority: 1 },
-      { question: 'What is your moat — and why is it durable, not just a head start?', topic: 'moat', priority: 2 },
-      { question: 'How does your pricing compare to alternatives and why won\'t customers just switch?', topic: 'pricing_defensibility', priority: 3 },
+      { question: `What specifically stops ${competitorRef} from building exactly what you're building in the next 6 months?`, topic: 'copy_risk', priority: 1, depth: 0 },
+      { question: 'What is your moat — and why is it durable, not just a head start?', topic: 'moat', priority: 2, depth: 0 },
+      { question: 'How does your pricing compare to alternatives and why won\'t customers just switch?', topic: 'pricing_defensibility', priority: 3, depth: 0 },
     ]
   }
 }
 
 // ─── EVALUATE FOUNDER RESPONSE ───────────────────────────────────────────────
-// Called after every founder answer — all agents evaluate in parallel
-// Returns: { annotation, queueUpdates, followUp, passControl }
-async function evaluateResponse(pitch, founderResponse, lastQuestion, currentQueue, allAnnotations) {
-  const annotationContext = allAnnotations.length
-    ? `\nOTHER AGENTS FOUND:\n${allAnnotations.map(a => `- ${a.agent}: ${a.type} — ${a.topic}`).join('\n')}`
-    : ''
-
+// Called after every founder answer — all agents evaluate in parallel (isolated, Shark Tank model)
+// Returns: { annotation, satisfied, followUp, newQueueItems }
+async function evaluateResponse(pitch, founderResponse, lastQuestion, lastTopic, currentDepth, currentQueue) {
   const prompt = `You are the Competitor agent evaluating a founder's response.
 
 QUESTION ASKED: "${lastQuestion}"
 FOUNDER ANSWERED: "${founderResponse}"
-${annotationContext}
+TOPIC DEPTH: This topic ("${lastTopic}") has been followed up ${currentDepth} time(s) already.
 
 Respond with JSON only:
 {
   "satisfied": true/false,
   "annotation": { "type": "WEAK_POINT|STRONG_POINT|CONTRADICTION|DEFLECTION", "topic": "...", "confidence": "high|medium|low", "note": "one sentence max" },
   "followUp": "follow-up question if not satisfied, or null",
-  "newQueueItems": [{ "question": "...", "topic": "...", "priority": 1-5 }]
+  "newQueueItems": [{ "question": "...", "topic": "...", "priority": 2, "depth": 0 }]
 }
 
 Rules:
 - satisfied=true only if the answer is specific, credible, and complete
+- If topic depth >= 2, set satisfied=true and followUp=null — topic is closed, move on
 - followUp must be ONE sharp question or null
 - newQueueItems: add questions this response opened up (max 2)`
 
