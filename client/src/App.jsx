@@ -2,6 +2,8 @@ import { Routes, Route, Navigate } from 'react-router-dom'
 import { AuthProvider, useAuth } from './context/AuthContext'
 import Landing from './pages/Landing'
 import Dashboard from './pages/Dashboard'
+import SessionRunner from './pages/SessionRunner'
+import Debrief from './pages/Debrief'
 
 function ProtectedRoute({ children }) {
   const { user } = useAuth()
@@ -17,6 +19,12 @@ function AppRoutes() {
       <Route path="/" element={<Landing />} />
       <Route path="/dashboard" element={
         <ProtectedRoute><Dashboard /></ProtectedRoute>
+      } />
+      <Route path="/session/:id" element={
+        <ProtectedRoute><SessionRunner /></ProtectedRoute>
+      } />
+      <Route path="/session/:id/debrief" element={
+        <ProtectedRoute><Debrief /></ProtectedRoute>
       } />
     </Routes>
   )

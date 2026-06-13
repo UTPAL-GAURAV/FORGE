@@ -245,4 +245,5 @@ module.exports = {
   nominateWeaknesses,
   buildSystemPrompt,
   getFirstQuestion,
+  evaluateResponse,
 }

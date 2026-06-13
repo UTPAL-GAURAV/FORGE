@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import { useAuth, API_URL } from '../context/AuthContext'
 import { useNavigate } from 'react-router-dom'
 
@@ -7,24 +7,13 @@ const OPTIONAL_FIELDS = [
   'revenue_model', 'traction', 'key_metrics', 'target_customer',
   'tam', 'competitors', 'team', 'prior_funding', 'known_risks',
 ]
-
 const COMPLETENESS_HINTS = {
-  industry: 'industry',
-  stage: 'stage',
-  use_of_funds: 'use of funds',
-  problem: 'problem statement',
-  solution: 'solution',
-  revenue_model: 'revenue model',
-  traction: 'traction',
-  key_metrics: 'key metrics',
-  target_customer: 'target customer',
-  tam: 'market size',
-  competitors: 'competitor info',
-  team: 'team info',
-  prior_funding: 'prior funding',
-  known_risks: 'known risks',
+  industry: 'industry', stage: 'stage', use_of_funds: 'use of funds',
+  problem: 'problem statement', solution: 'solution', revenue_model: 'revenue model',
+  traction: 'traction', key_metrics: 'key metrics', target_customer: 'target customer',
+  tam: 'market size', competitors: 'competitor info', team: 'team info',
+  prior_funding: 'prior funding', known_risks: 'known risks',
 }
-
 function completeness(form) {
   const filled = OPTIONAL_FIELDS.filter(f => form[f]?.trim())
   const pct = Math.round((filled.length / OPTIONAL_FIELDS.length) * 100)
@@ -33,19 +22,30 @@ function completeness(form) {
   return { pct, hint }
 }
 
+const AGENT_META = {
+  investor:   { label: 'Investor',   color: '#e8ff47' },
+  competitor: { label: 'Competitor', color: '#ff8c47' },
+  red_team:   { label: 'Red Team',   color: '#ff4747' },
+  customer:   { label: 'Customer',   color: '#47c8ff' },
+}
+
 export default function Dashboard() {
   const { user, logout } = useAuth()
   const navigate = useNavigate()
   const [projects, setProjects] = useState([])
   const [loading, setLoading] = useState(true)
   const [showNewProject, setShowNewProject] = useState(false)
+  const [historySession, setHistorySession] = useState(null) // { id, name, round }
+  const [outcomeSession, setOutcomeSession] = useState(null) // session object
 
-  useEffect(() => {
+  const reload = useCallback(() => {
     fetch(`${API_URL}/api/projects`, { credentials: 'include' })
       .then(r => r.json())
       .then(data => { setProjects(Array.isArray(data) ? data : []); setLoading(false) })
       .catch(() => setLoading(false))
   }, [])
+
+  useEffect(() => { reload() }, [reload])
 
   const onProjectCreated = (project) => {
     setProjects(p => [{ ...project, sessions: [] }, ...p])
@@ -57,9 +57,7 @@ export default function Dashboard() {
       <aside className="dash-sidebar">
         <div className="dash-logo" onClick={() => navigate('/')} style={{ cursor: 'pointer' }}>FORGE<span>.</span></div>
         <nav className="dash-nav">
-          <a className="dash-nav-item active" href="/dashboard">
-            <span>⚡</span> Sessions
-          </a>
+          <a className="dash-nav-item active" href="/dashboard"><span>⚡</span> Sessions</a>
         </nav>
         <div className="dash-sidebar-bottom">
           <div className="dash-user">
@@ -75,28 +73,48 @@ export default function Dashboard() {
 
       <main className="dash-main">
         <div className="dash-inner">
-        <div className="dash-header">
-          <div>
-            <h1 className="dash-title">Your Pitches</h1>
-            <p className="dash-subtitle">Each project is a pitch. Each round is a session.</p>
+          <div className="dash-header">
+            <div>
+              <h1 className="dash-title">Your Pitches</h1>
+              <p className="dash-subtitle">Each project is a pitch. Each round is a session.</p>
+            </div>
+            <button className="btn-primary" onClick={() => setShowNewProject(true)}>+ New Project</button>
           </div>
-          <button className="btn-primary" onClick={() => setShowNewProject(true)}>+ New Project</button>
-        </div>
 
-        {loading ? (
-          <div className="empty-state"><p style={{ color: 'var(--text-muted)' }}>Loading...</p></div>
-        ) : projects.length === 0 ? (
-          <EmptyState onNew={() => setShowNewProject(true)} />
-        ) : (
-          <div className="project-list">
-            {projects.map(p => <ProjectCard key={p.id} project={p} />)}
-          </div>
-        )}
+          {loading ? (
+            <div className="empty-state"><p style={{ color: 'var(--text-muted)' }}>Loading...</p></div>
+          ) : projects.length === 0 ? (
+            <EmptyState onNew={() => setShowNewProject(true)} />
+          ) : (
+            <div className="project-list">
+              {projects.map(p => (
+                <ProjectCard
+                  key={p.id}
+                  project={p}
+                  onViewHistory={(s) => setHistorySession(s)}
+                  onLogOutcome={(s) => setOutcomeSession(s)}
+                  onReload={reload}
+                />
+              ))}
+            </div>
+          )}
         </div>
       </main>
 
       {showNewProject && (
         <NewProjectModal onClose={() => setShowNewProject(false)} onCreated={onProjectCreated} />
+      )}
+
+      {historySession && (
+        <SessionHistoryDrawer session={historySession} onClose={() => setHistorySession(null)} />
+      )}
+
+      {outcomeSession && (
+        <OutcomeLoggerModal
+          session={outcomeSession}
+          onClose={() => setOutcomeSession(null)}
+          onSaved={() => { setOutcomeSession(null); reload() }}
+        />
       )}
     </div>
   )
@@ -113,10 +131,14 @@ function EmptyState({ onNew }) {
   )
 }
 
-function ProjectCard({ project }) {
+function ProjectCard({ project, onViewHistory, onLogOutcome, onReload }) {
   const [open, setOpen] = useState(true)
   const [starting, setStarting] = useState(false)
   const navigate = useNavigate()
+
+  const sessions = project.sessions || []
+  const completedCount = sessions.filter(s => s.status === 'completed').length
+  const nextRound = sessions.length + 1
 
   const startSession = async () => {
     setStarting(true)
@@ -135,6 +157,7 @@ function ProjectCard({ project }) {
       setStarting(false)
     }
   }
+
   return (
     <div className="project-card">
       <button className="project-card-header" onClick={() => setOpen(o => !o)}>
@@ -145,14 +168,43 @@ function ProjectCard({ project }) {
             <div className="project-meta">{project.one_liner}</div>
           </div>
         </div>
-        <span className="project-chevron">{open ? '▲' : '▼'}</span>
+        <div className="project-card-right">
+          {sessions.length > 0 && (
+            <span className="project-round-badge">{completedCount}/{sessions.length} rounds</span>
+          )}
+          <span className="project-chevron">{open ? '▲' : '▼'}</span>
+        </div>
       </button>
+
       {open && (
         <div className="project-rounds">
-          {(!project.sessions || project.sessions.length === 0) ? (
-            <div className="round-empty">No sessions yet. <button className="link-btn" onClick={startSession} disabled={starting}>{starting ? 'Starting...' : 'Start Round 1 →'}</button></div>
+          {sessions.length === 0 ? (
+            <div className="round-empty">
+              No sessions yet.{' '}
+              <button className="link-btn" onClick={startSession} disabled={starting}>
+                {starting ? 'Starting...' : 'Start Round 1 →'}
+              </button>
+            </div>
           ) : (
-            project.sessions.map(s => <RoundRow key={s.id} session={s} />)
+            <>
+              {sessions.map(s => (
+                <RoundRow
+                  key={s.id}
+                  session={s}
+                  projectName={project.name}
+                  onViewHistory={onViewHistory}
+                  onLogOutcome={onLogOutcome}
+                />
+              ))}
+              {/* Start next round only if last session is completed */}
+              {sessions[sessions.length - 1]?.status === 'completed' && (
+                <div className="round-new-row">
+                  <button className="btn-primary" style={{ fontSize: 13, padding: '9px 18px' }} onClick={startSession} disabled={starting}>
+                    {starting ? 'Starting...' : `+ Start Round ${nextRound}`}
+                  </button>
+                </div>
+              )}
+            </>
           )}
         </div>
       )}
@@ -160,32 +212,264 @@ function ProjectCard({ project }) {
   )
 }
 
-function RoundRow({ session }) {
-  const date = new Date(session.created_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
+function RoundRow({ session, projectName, onViewHistory, onLogOutcome }) {
+  const navigate = useNavigate()
   const isComplete = session.status === 'completed'
+  const date = new Date(session.created_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
+  const completedDate = session.completed_at
+    ? new Date(session.completed_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
+    : null
+
   return (
     <div className="round-row">
       <div className="round-left">
         <span className="round-label">Round {session.round_number}</span>
-        <span className="round-date">{date}</span>
-        <span className={`round-status ${session.status}`}>{isComplete ? 'Completed' : 'In Progress'}</span>
+        <span className="round-date">{completedDate || date}</span>
+        <span className={`round-status ${session.status}`}>
+          {isComplete ? 'Completed' : 'In Progress'}
+        </span>
       </div>
       <div className="round-actions">
         {isComplete ? (
           <>
-            <button className="round-btn">Report</button>
-            <button className="round-btn primary">Start Round {session.round_number + 1} →</button>
+            <button
+              className="round-btn"
+              onClick={() => navigate(`/session/${session.id}/debrief`)}
+            >
+              Report
+            </button>
+            <button
+              className="round-btn"
+              onClick={() => onViewHistory({ id: session.id, name: projectName, round: session.round_number })}
+            >
+              History
+            </button>
+            {!session.outcome_logged && (
+              <button className="round-btn subtle" onClick={() => onLogOutcome(session)}>
+                Log Outcome ↗
+              </button>
+            )}
+            {session.outcome_logged && (
+              <span className="round-outcome-done">✓ Outcome logged</span>
+            )}
           </>
         ) : (
-          <button className="round-btn primary">Resume →</button>
-        )}
-        {isComplete && !session.outcome_logged && (
-          <button className="round-btn subtle">Log Outcome ↗</button>
+          <button className="round-btn primary" onClick={() => navigate(`/session/${session.id}`)}>
+            Resume →
+          </button>
         )}
       </div>
     </div>
   )
 }
+
+// ─── SESSION HISTORY DRAWER ───────────────────────────────────────────────────
+
+function SessionHistoryDrawer({ session, onClose }) {
+  const [loading, setLoading] = useState(true)
+  const [exchanges, setExchanges] = useState([])
+  const [error, setError] = useState(null)
+
+  useEffect(() => {
+    fetch(`${API_URL}/api/sessions/${session.id}/history`, { credentials: 'include' })
+      .then(r => r.json())
+      .then(data => {
+        if (data.error) throw new Error(data.error)
+        setExchanges(data.exchanges || [])
+        setLoading(false)
+      })
+      .catch(e => { setError(e.message); setLoading(false) })
+  }, [session.id])
+
+  return (
+    <div className="drawer-overlay" onClick={onClose}>
+      <div className="drawer" onClick={e => e.stopPropagation()}>
+        <div className="drawer-header">
+          <div>
+            <div className="drawer-title">{session.name} — Round {session.round} History</div>
+            <div className="drawer-subtitle">Read-only log of all exchanges</div>
+          </div>
+          <button className="drawer-close" onClick={onClose}>✕</button>
+        </div>
+
+        <div className="drawer-body">
+          {loading && <div className="drawer-loading">Loading exchanges...</div>}
+          {error && <div className="drawer-error">{error}</div>}
+          {!loading && !error && exchanges.length === 0 && (
+            <div className="drawer-empty">No exchanges recorded for this session.</div>
+          )}
+          {exchanges.map((ex, i) => (
+            <ExchangeCard key={i} exchange={ex} index={i + 1} />
+          ))}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function ExchangeCard({ exchange, index }) {
+  const agentMeta = AGENT_META[exchange.agent] || { label: exchange.agent, color: '#888' }
+  return (
+    <div className="exchange-card">
+      <div className="exchange-num">#{index}</div>
+      <div className="exchange-body">
+        <div className="exchange-q">
+          <span className="exchange-agent-label" style={{ color: agentMeta.color }}>
+            {agentMeta.label}
+          </span>
+          <p className="exchange-question">{exchange.question}</p>
+        </div>
+        {exchange.answer ? (
+          <div className="exchange-a">
+            <span className="exchange-founder-label">You</span>
+            <p className="exchange-answer">{exchange.answer}</p>
+          </div>
+        ) : (
+          <div className="exchange-unanswered">— Not answered</div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+// ─── OUTCOME LOGGER MODAL ─────────────────────────────────────────────────────
+
+const OUTCOME_OPTIONS = [
+  { value: 'got_investment', label: 'Got investment 🎉' },
+  { value: 'follow_up', label: 'Follow-up scheduled' },
+  { value: 'passed', label: 'Passed' },
+  { value: 'no_response', label: 'No response yet' },
+]
+
+function OutcomeLoggerModal({ session, onClose, onSaved }) {
+  const EMPTY = {
+    meeting_happened: true,
+    outcome: '',
+    main_objection: '',
+    caught_off_guard: '',
+    wished_prepared: '',
+    investor_feedback: '',
+  }
+  const [form, setForm] = useState(EMPTY)
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState(null)
+  const set = (k, v) => setForm(f => ({ ...f, [k]: v }))
+
+  const handleSubmit = async () => {
+    setSaving(true)
+    setError(null)
+    try {
+      const r = await fetch(`${API_URL}/api/sessions/${session.id}/outcome`, {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(form),
+      })
+      const data = await r.json()
+      if (!r.ok) throw new Error(data.error)
+      onSaved()
+    } catch (e) {
+      setError(e.message)
+      setSaving(false)
+    }
+  }
+
+  return (
+    <div className="modal-overlay" onClick={onClose}>
+      <div className="modal outcome-modal" onClick={e => e.stopPropagation()}>
+        <div className="intake-header">
+          <h2>Log Meeting Outcome</h2>
+          <p>Round {session.round_number} — agents use this to sharpen their attacks next time.</p>
+        </div>
+
+        <div className="outcome-body">
+          <div className="form-group">
+            <label>Did the meeting happen?</label>
+            <div className="outcome-toggle">
+              <button
+                className={`outcome-toggle-btn ${form.meeting_happened ? 'active' : ''}`}
+                onClick={() => set('meeting_happened', true)}
+              >Yes</button>
+              <button
+                className={`outcome-toggle-btn ${!form.meeting_happened ? 'active' : ''}`}
+                onClick={() => set('meeting_happened', false)}
+              >Not yet</button>
+            </div>
+          </div>
+
+          {form.meeting_happened && (
+            <>
+              <div className="form-group">
+                <label>Outcome</label>
+                <div className="outcome-options">
+                  {OUTCOME_OPTIONS.map(o => (
+                    <button
+                      key={o.value}
+                      className={`outcome-option-btn ${form.outcome === o.value ? 'active' : ''}`}
+                      onClick={() => set('outcome', o.value)}
+                    >{o.label}</button>
+                  ))}
+                </div>
+              </div>
+
+              <div className="form-group">
+                <label>Investor's main objection</label>
+                <textarea
+                  className="form-input form-textarea"
+                  placeholder="What did they push back on hardest?"
+                  value={form.main_objection}
+                  onChange={e => set('main_objection', e.target.value)}
+                />
+              </div>
+
+              <div className="form-group">
+                <label>What question caught you most off guard?</label>
+                <textarea
+                  className="form-input form-textarea"
+                  placeholder="The one you weren't ready for..."
+                  value={form.caught_off_guard}
+                  onChange={e => set('caught_off_guard', e.target.value)}
+                />
+                <div className="field-hint">Red Team will open with a variant of this next round.</div>
+              </div>
+
+              <div className="form-group">
+                <label>What did you wish you'd prepared better?</label>
+                <textarea
+                  className="form-input form-textarea"
+                  placeholder="Specific topics, numbers, or stories you fumbled..."
+                  value={form.wished_prepared}
+                  onChange={e => set('wished_prepared', e.target.value)}
+                />
+              </div>
+
+              <div className="form-group">
+                <label>Any feedback the investor gave?</label>
+                <textarea
+                  className="form-input form-textarea"
+                  placeholder="Specific things they said about the pitch, team, or market..."
+                  value={form.investor_feedback}
+                  onChange={e => set('investor_feedback', e.target.value)}
+                />
+              </div>
+            </>
+          )}
+        </div>
+
+        {error && <div className="form-error">{error}</div>}
+
+        <div className="intake-footer">
+          <button className="btn-ghost" onClick={onClose}>Cancel</button>
+          <button className="btn-primary" onClick={handleSubmit} disabled={saving}>
+            {saving ? 'Saving...' : 'Save Outcome →'}
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// ─── NEW PROJECT MODAL (unchanged) ───────────────────────────────────────────
 
 function NewProjectModal({ onClose, onCreated }) {
   const EMPTY = {
@@ -197,7 +481,7 @@ function NewProjectModal({ onClose, onCreated }) {
   const [form, setForm] = useState(EMPTY)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState(null)
-  const [section, setSection] = useState('basics') // basics | business | market | team
+  const [section, setSection] = useState('basics')
 
   const set = (k, v) => setForm(f => ({ ...f, [k]: v }))
 
@@ -242,7 +526,6 @@ function NewProjectModal({ onClose, onCreated }) {
           <p>Brief the panel before they brief you.</p>
         </div>
 
-        {/* Completeness bar */}
         <div className="completeness-bar-wrap">
           <div className="completeness-label">
             <span>Pitch strength</span>
@@ -254,7 +537,6 @@ function NewProjectModal({ onClose, onCreated }) {
           <div className="completeness-hint">{hint}</div>
         </div>
 
-        {/* Tabs */}
         <div className="intake-tabs">
           {tabs.map(t => (
             <button
@@ -286,9 +568,7 @@ function NewProjectModal({ onClose, onCreated }) {
                   <input className="form-input" type="number" placeholder="10" value={form.equity_percent} onChange={e => set('equity_percent', e.target.value)} />
                 </div>
               </div>
-              {implied && (
-                <div className="implied-val">Implied valuation: <strong>${implied}</strong></div>
-              )}
+              {implied && <div className="implied-val">Implied valuation: <strong>${implied}</strong></div>}
               <div className="form-row">
                 <div className="form-group">
                   <label>Industry</label>
@@ -298,10 +578,8 @@ function NewProjectModal({ onClose, onCreated }) {
                   <label>Stage</label>
                   <select className="form-input" value={form.stage} onChange={e => set('stage', e.target.value)}>
                     <option value="">Select stage</option>
-                    <option>Idea</option>
-                    <option>Pre-revenue</option>
-                    <option>Revenue</option>
-                    <option>Growth</option>
+                    <option>Idea</option><option>Pre-revenue</option>
+                    <option>Revenue</option><option>Growth</option>
                   </select>
                 </div>
               </div>
@@ -311,7 +589,6 @@ function NewProjectModal({ onClose, onCreated }) {
               </div>
             </>
           )}
-
           {section === 'business' && (
             <>
               <div className="form-group">
@@ -336,7 +613,6 @@ function NewProjectModal({ onClose, onCreated }) {
               </div>
             </>
           )}
-
           {section === 'market' && (
             <>
               <div className="form-group">
@@ -353,7 +629,6 @@ function NewProjectModal({ onClose, onCreated }) {
               </div>
             </>
           )}
-
           {section === 'team' && (
             <>
               <div className="form-group">

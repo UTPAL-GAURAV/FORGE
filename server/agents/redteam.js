@@ -324,4 +324,5 @@ module.exports = {
   buildSystemPrompt,
   getFirstQuestion,
   arbitrateDebrief,
+  evaluateResponse,
 }

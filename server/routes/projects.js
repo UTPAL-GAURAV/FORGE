@@ -14,11 +14,15 @@ router.get('/', requireAuth, async (req, res) => {
             'round_number', s.round_number,
             'status', s.status,
             'created_at', s.created_at,
-            'band_room_id', s.band_room_id
+            'completed_at', s.completed_at,
+            'band_room_id', s.band_room_id,
+            'outcome_logged', s.outcome_logged,
+            'has_debrief', (sd.id IS NOT NULL)
           ) ORDER BY s.round_number
         ) FILTER (WHERE s.id IS NOT NULL) AS sessions
        FROM projects p
        LEFT JOIN sessions s ON s.project_id = p.id
+       LEFT JOIN session_debriefs sd ON sd.session_id = s.id
        WHERE p.user_id = $1
        GROUP BY p.id
        ORDER BY p.created_at DESC`,
