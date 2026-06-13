@@ -230,6 +230,12 @@ router.post('/:id/turn', requireAuth, async (req, res) => {
     const agentQueues = {}
     queues.forEach(q => { agentQueues[q.agent] = q.questions })
 
+    // Load session history for background eval (agents use it to avoid repeating covered topics)
+    const { rows: events } = await pool.query(
+      `SELECT event_type, agent, payload FROM session_events WHERE session_id = $1 ORDER BY created_at ASC`,
+      [session.id]
+    )
+
     // Count questions asked so far per agent (for 40% share cap)
     const { rows: questionCounts } = await pool.query(
       `SELECT agent, COUNT(*) as count FROM session_events WHERE session_id = $1 AND event_type = 'AGENT_QUESTION' GROUP BY agent`,
@@ -272,7 +278,7 @@ router.post('/:id/turn', requireAuth, async (req, res) => {
     }
 
     // Stash everything needed for background eval before responding
-    bgEvalArgs = { session, pitch, founderResponse, lastQuestion, lastTopic: lastTopic || 'general', lastDepth: lastDepth ?? 0, activeAgent, agentQueues, band_room_id: session.band_room_id }
+    bgEvalArgs = { session, pitch, founderResponse, lastQuestion, lastTopic: lastTopic || 'general', lastDepth: lastDepth ?? 0, activeAgent, agentQueues, band_room_id: session.band_room_id, sessionHistory: events }
 
     res.json({ question: nextQuestion || null, activeAgent: nextAgent || activeAgent, topic: nextTopic || 'general', depth: nextDepth, sidebarEvents, sessionEnded })
 
@@ -634,7 +640,7 @@ function pickNextQuestion(agentQueues, justAsked, askedByAgent, totalAsked) {
 
 // Background evaluation — runs after response sent, all 4 agents evaluate independently
 // Updates queues with follow-ups and newly discovered questions (Shark Tank model — no cross-agent context)
-async function runBackgroundEvaluation({ session, pitch, founderResponse, lastQuestion, lastTopic, lastDepth, activeAgent, agentQueues, band_room_id }) {
+async function runBackgroundEvaluation({ session, pitch, founderResponse, lastQuestion, lastTopic, lastDepth, activeAgent, agentQueues, band_room_id, sessionHistory }) {
   const results = await Promise.allSettled(
     AGENT_ORDER.map(agentName =>
       AGENTS[agentName].evaluateResponse
@@ -644,7 +650,8 @@ async function runBackgroundEvaluation({ session, pitch, founderResponse, lastQu
             lastQuestion,
             agentName === activeAgent ? lastTopic : (agentQueues[agentName]?.[0]?.topic || 'general'),
             agentName === activeAgent ? lastDepth : 0,
-            agentQueues[agentName] || []
+            agentQueues[agentName] || [],
+            sessionHistory || []
           )
         : Promise.resolve(null)
     )
@@ -681,11 +688,20 @@ async function runBackgroundEvaluation({ session, pitch, founderResponse, lastQu
       await postEvent(band_room_id, agentName, 'QUEUE_UPDATE', { added: [followUpItem] }).catch(() => {})
     }
 
-    // All agents: append newly discovered queue items (P2 minimum, depth 0)
+    // All agents: append newly discovered queue items — deduplicate by topic against existing queue and session history
     if (eval_.newQueueItems?.length) {
-      const newItems = eval_.newQueueItems.map(item => ({ ...item, priority: Math.max(item.priority ?? 2, 2), depth: 0 }))
-      queue = [...queue, ...newItems].sort((a, b) => a.priority - b.priority)
-      await postEvent(band_room_id, agentName, 'QUEUE_UPDATE', { added: newItems }).catch(() => {})
+      const coveredTopics = new Set([
+        ...(sessionHistory || []).filter(e => e.event_type === 'AGENT_QUESTION').map(e => e.payload?.topic).filter(Boolean),
+        ...queue.map(q => q.topic).filter(Boolean),
+      ])
+      const newItems = eval_.newQueueItems
+        .slice(0, 1) // hard cap: max 1 new item per agent per turn
+        .map(item => ({ ...item, priority: Math.max(item.priority ?? 2, 2), depth: 0 }))
+        .filter(item => item.topic && !coveredTopics.has(item.topic))
+      if (newItems.length) {
+        queue = [...queue, ...newItems].sort((a, b) => a.priority - b.priority)
+        await postEvent(band_room_id, agentName, 'QUEUE_UPDATE', { added: newItems }).catch(() => {})
+      }
     }
 
     if ((agentName === activeAgent && !eval_.satisfied && eval_.followUp && lastDepth < 2) || eval_.newQueueItems?.length) {

@@ -80,6 +80,57 @@ router.post('/', requireAuth, async (req, res) => {
   }
 })
 
+// PATCH update project (only before any session has started)
+router.patch('/:id', requireAuth, async (req, res) => {
+  const {
+    name, one_liner, funding_amount, equity_percent,
+    industry, stage, use_of_funds, problem, solution,
+    revenue_model, traction, key_metrics, target_customer,
+    tam, competitors, team, prior_funding, known_risks,
+  } = req.body
+
+  if (!name || !one_liner || !funding_amount || !equity_percent) {
+    return res.status(400).json({ error: 'Missing required fields' })
+  }
+
+  try {
+    // Only allow edit if no sessions exist yet
+    const { rows: sessions } = await pool.query(
+      `SELECT id FROM sessions WHERE project_id = $1 LIMIT 1`, [req.params.id]
+    )
+    if (sessions.length) {
+      return res.status(403).json({ error: 'Cannot edit after a session has started' })
+    }
+
+    const implied_valuation = parseFloat(equity_percent) > 0
+      ? parseFloat(funding_amount) / (parseFloat(equity_percent) / 100)
+      : null
+
+    const { rows } = await pool.query(
+      `UPDATE projects SET
+        name=$1, one_liner=$2, funding_amount=$3, equity_percent=$4, implied_valuation=$5,
+        industry=$6, stage=$7, use_of_funds=$8, problem=$9, solution=$10,
+        revenue_model=$11, traction=$12, key_metrics=$13, target_customer=$14,
+        tam=$15, competitors=$16, team=$17, prior_funding=$18, known_risks=$19
+       WHERE id=$20 AND user_id=$21 RETURNING *`,
+      [
+        name, one_liner, funding_amount, equity_percent, implied_valuation,
+        industry || null, stage || null, use_of_funds || null,
+        problem || null, solution || null, revenue_model || null,
+        traction || null, key_metrics || null, target_customer || null,
+        tam || null, competitors || null, team || null,
+        prior_funding || null, known_risks || null,
+        req.params.id, req.user.id,
+      ]
+    )
+    if (!rows.length) return res.status(404).json({ error: 'Project not found' })
+    res.json(rows[0])
+  } catch (err) {
+    logErr('PATCH /projects/:id', err)
+    res.status(500).json({ error: 'Failed to update project' })
+  }
+})
+
 // DELETE project
 router.delete('/:id', requireAuth, async (req, res) => {
   try {

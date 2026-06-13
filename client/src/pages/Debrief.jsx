@@ -231,10 +231,10 @@ export default function Debrief() {
 
           {/* Footer */}
           <div className="debrief-footer">
-            <button className="btn-primary" onClick={() => navigate('/dashboard')}>
-              Start Round {roundNum + 1} →
-            </button>
             <button className="btn-ghost" onClick={() => navigate('/dashboard')}>
+              ← Back to Dashboard
+            </button>
+            <button className="btn-ghost" onClick={() => navigate('/dashboard', { state: { openOutcomeFor: session?.id } })}>
               Log Meeting Outcome
             </button>
           </div>

@@ -48,9 +48,20 @@ RULES:
 async function initQueue(pitch) {
   const targetCustomer = pitch.target_customer || 'not specified'
 
-  const prompt = `Based on this pitch, generate 5 sharp customer-perspective questions as a JSON array.
+  const prompt = `Based on this pitch, generate 5 sharp questions from a skeptical customer's perspective as a JSON array.
 Each question is an object: { "question": "...", "topic": "...", "priority": 1-5 }
-Priority 1 = most dangerous. Focus on: willingness to pay the stated price, how customers discover this product, what onboarding looks like, why someone would switch from their current solution, what happens when the first customer churns.
+Priority 1 = most dangerous.
+
+YOU ARE A CUSTOMER, NOT AN INVESTOR. Your questions must ONLY cover:
+- Willingness to pay the stated price
+- How a customer discovers and adopts this product
+- Onboarding friction and time-to-value
+- Why someone switches from what they use today
+- Retention: what makes a customer stay or churn
+- Whether the problem is real and painful enough to change behaviour
+- Real customer validation: who has actually used or paid for this
+
+DO NOT ask about: funding, valuation, market size, TAM, team composition, investors, risks, or financials. Those belong to other agents.
 Only output valid JSON. No explanation.
 
 Pitch: ${pitch.name} — ${pitch.one_liner}
@@ -84,12 +95,23 @@ function getFirstQuestion(pitch) {
 // ─── EVALUATE FOUNDER RESPONSE ───────────────────────────────────────────────
 // Called after every founder answer — all agents evaluate in parallel (isolated, Shark Tank model)
 // Returns: { annotation, satisfied, followUp, newQueueItems }
-async function evaluateResponse(pitch, founderResponse, lastQuestion, lastTopic, currentDepth, currentQueue) {
+async function evaluateResponse(pitch, founderResponse, lastQuestion, lastTopic, currentDepth, currentQueue, sessionHistory) {
+  const coveredTopics = (sessionHistory || [])
+    .filter(e => e.event_type === 'AGENT_QUESTION')
+    .map(e => e.payload?.topic)
+    .filter(Boolean)
+  const coveredLine = coveredTopics.length
+    ? `TOPICS ALREADY COVERED THIS SESSION: ${[...new Set(coveredTopics)].join(', ')} — do NOT add newQueueItems on these topics.`
+    : ''
+
   const prompt = `You are the Customer agent evaluating a founder's response.
 
 QUESTION ASKED: "${lastQuestion}"
 FOUNDER ANSWERED: "${founderResponse}"
 TOPIC DEPTH: This topic ("${lastTopic}") has been followed up ${currentDepth} time(s) already.
+${coveredLine}
+
+YOU ARE A CUSTOMER, NOT AN INVESTOR. Only add newQueueItems about: willingness to pay, adoption, onboarding, retention, churn, or problem severity. Never ask about funding, team, market size, valuation, or risks.
 
 Respond with JSON only:
 {
@@ -103,7 +125,7 @@ Rules:
 - satisfied=true only if the answer is specific, credible, with real examples — not hypothetical
 - If topic depth >= 2, set satisfied=true and followUp=null — topic is closed, move on
 - followUp must be ONE sharp question or null
-- newQueueItems: add questions this response opened up (max 2)`
+- newQueueItems: max 1 item, only if it covers a genuinely new customer-perspective topic not yet explored this session`
 
   const res = await callFeatherless([{ role: 'user', content: prompt }], 350)
   try {

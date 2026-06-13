@@ -87,12 +87,21 @@ ${knownRisksLine}`
 // ─── EVALUATE FOUNDER RESPONSE ───────────────────────────────────────────────
 // Called after every founder answer — all agents evaluate in parallel (isolated, Shark Tank model)
 // Returns: { annotation, satisfied, followUp, newQueueItems }
-async function evaluateResponse(pitch, founderResponse, lastQuestion, lastTopic, currentDepth, currentQueue) {
+async function evaluateResponse(pitch, founderResponse, lastQuestion, lastTopic, currentDepth, currentQueue, sessionHistory) {
+  const coveredTopics = (sessionHistory || [])
+    .filter(e => e.event_type === 'AGENT_QUESTION')
+    .map(e => e.payload?.topic)
+    .filter(Boolean)
+  const coveredLine = coveredTopics.length
+    ? `TOPICS ALREADY COVERED THIS SESSION: ${[...new Set(coveredTopics)].join(', ')} — do NOT add newQueueItems on these topics.`
+    : ''
+
   const prompt = `You are the Red Team agent evaluating a founder's response.
 
 QUESTION ASKED: "${lastQuestion}"
 FOUNDER ANSWERED: "${founderResponse}"
 TOPIC DEPTH: This topic ("${lastTopic}") has been followed up ${currentDepth} time(s) already.
+${coveredLine}
 
 Respond with JSON only:
 {
@@ -106,7 +115,7 @@ Rules:
 - satisfied=true only if the answer is specific, credible, logically consistent, and complete
 - If topic depth >= 2, set satisfied=true and followUp=null — topic is closed, move on
 - followUp must be ONE sharp question or null
-- newQueueItems: add questions this response opened up (max 2)`
+- newQueueItems: max 1 item, only if it covers a genuinely new topic not yet explored this session`
 
   const res = await callAIML([{ role: 'user', content: prompt }], 300)
   try {

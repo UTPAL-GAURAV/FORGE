@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from 'react'
 import { useAuth, API_URL } from '../context/AuthContext'
-import { useNavigate } from 'react-router-dom'
+import { useNavigate, useLocation } from 'react-router-dom'
 
 const OPTIONAL_FIELDS = [
   'industry', 'stage', 'use_of_funds', 'problem', 'solution',
@@ -32,12 +32,13 @@ const AGENT_META = {
 export default function Dashboard() {
   const { user, logout } = useAuth()
   const navigate = useNavigate()
+  const location = useLocation()
   const [projects, setProjects] = useState([])
   const [loading, setLoading] = useState(true)
   const [showNewProject, setShowNewProject] = useState(false)
   const [historySession, setHistorySession] = useState(null) // { id, name, round }
   const [outcomeSession, setOutcomeSession] = useState(null) // session object
-  const [detailProject, setDetailProject] = useState(null) // project object
+  const [detailProject, setDetailProject] = useState(null) // { project, editable }
 
   const reload = useCallback(() => {
     fetch(`${API_URL}/api/projects`, { credentials: 'include' })
@@ -47,6 +48,18 @@ export default function Dashboard() {
   }, [])
 
   useEffect(() => { reload() }, [reload])
+
+  // Auto-open outcome modal when navigated from debrief with a session ID
+  useEffect(() => {
+    const targetId = location.state?.openOutcomeFor
+    if (!targetId || loading) return
+    const session = projects.flatMap(p => p.sessions || []).find(s => s.id === targetId)
+    if (session) {
+      setOutcomeSession(session)
+      // Clear the state so refreshing doesn't re-open
+      navigate('/dashboard', { replace: true, state: {} })
+    }
+  }, [location.state, projects, loading, navigate])
 
   const onProjectCreated = (project) => {
     setProjects(p => [{ ...project, sessions: [] }, ...p])
@@ -94,7 +107,7 @@ export default function Dashboard() {
                   project={p}
                   onViewHistory={(s) => setHistorySession(s)}
                   onLogOutcome={(s) => setOutcomeSession(s)}
-                  onViewDetail={(p) => setDetailProject(p)}
+                  onViewDetail={(p, editable) => setDetailProject({ project: p, editable })}
                   onReload={reload}
                 />
               ))}
@@ -119,7 +132,15 @@ export default function Dashboard() {
         />
       )}
       {detailProject && (
-        <ProjectDetailModal project={detailProject} onClose={() => setDetailProject(null)} />
+        <ProjectDetailModal
+          project={detailProject.project}
+          editable={detailProject.editable}
+          onClose={() => setDetailProject(null)}
+          onSaved={(updated) => {
+            setProjects(ps => ps.map(p => p.id === updated.id ? { ...p, ...updated } : p))
+            setDetailProject(null)
+          }}
+        />
       )}
     </div>
   )
@@ -179,7 +200,7 @@ function ProjectCard({ project, onViewHistory, onLogOutcome, onViewDetail, onRel
           )}
           <button
             className="project-info-btn"
-            onClick={e => { e.stopPropagation(); onViewDetail(project) }}
+            onClick={e => { e.stopPropagation(); onViewDetail(project, sessions.length === 0) }}
             title="View pitch details"
           >ⓘ</button>
           <span className="project-chevron">{open ? '▲' : '▼'}</span>
@@ -347,7 +368,7 @@ function ExchangeCard({ exchange, index }) {
 const OUTCOME_OPTIONS = [
   { value: 'got_investment', label: 'Got investment 🎉' },
   { value: 'follow_up', label: 'Follow-up scheduled' },
-  { value: 'passed', label: 'Passed' },
+  { value: 'passed', label: 'Rejected / Passed' },
   { value: 'no_response', label: 'No response yet' },
 ]
 
@@ -681,30 +702,220 @@ const DETAIL_LABELS = {
   prior_funding: 'Prior Funding', known_risks: 'Known Risks',
 }
 
-function ProjectDetailModal({ project, onClose }) {
+function ProjectDetailModal({ project, editable, onClose, onSaved }) {
+  const FIELDS = ['name', 'one_liner', 'funding_amount', 'equity_percent',
+    'industry', 'stage', 'use_of_funds', 'problem', 'solution',
+    'revenue_model', 'traction', 'key_metrics', 'target_customer',
+    'tam', 'competitors', 'team', 'prior_funding', 'known_risks']
+  const [form, setForm] = useState(() => {
+    const f = {}
+    FIELDS.forEach(k => { f[k] = project[k] ?? '' })
+    return f
+  })
+  const [section, setSection] = useState('basics')
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState(null)
+  const set = (k, v) => setForm(f => ({ ...f, [k]: v }))
+
+  const implied = form.funding_amount && form.equity_percent && parseFloat(form.equity_percent) > 0
+    ? (parseFloat(form.funding_amount) / (parseFloat(form.equity_percent) / 100)).toLocaleString('en-US', { maximumFractionDigits: 0 })
+    : null
+  const { pct, hint } = completeness(form)
+  const canSubmit = form.name && form.one_liner && form.funding_amount && form.equity_percent
+
+  const handleSave = async () => {
+    setSaving(true)
+    setError(null)
+    try {
+      const r = await fetch(`${API_URL}/api/projects/${project.id}`, {
+        method: 'PATCH',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(form),
+      })
+      const data = await r.json()
+      if (!r.ok) throw new Error(data.error)
+      onSaved(data)
+    } catch (e) {
+      setError(e.message)
+      setSaving(false)
+    }
+  }
+
+  const tabs = [
+    { id: 'basics', label: 'The Ask' },
+    { id: 'business', label: 'Business' },
+    { id: 'market', label: 'Market' },
+    { id: 'team', label: 'Team & Risks' },
+  ]
+
+  if (!editable) {
+    return (
+      <div className="modal-overlay" onClick={onClose}>
+        <div className="modal-box modal-box--wide" onClick={e => e.stopPropagation()}>
+          <div className="modal-header">
+            <h2 className="modal-title">📁 {project.name}</h2>
+            <button className="modal-close" onClick={onClose}>✕</button>
+          </div>
+          <div className="project-detail-grid">
+            {Object.entries(DETAIL_LABELS).map(([key, label]) => {
+              const val = project[key]
+              if (!val && val !== 0) return null
+              return (
+                <div key={key} className="project-detail-row">
+                  <div className="project-detail-label">{label}</div>
+                  <div className="project-detail-value">
+                    {key === 'funding_amount' ? `$${Number(val).toLocaleString()}`
+                      : key === 'equity_percent' ? `${val}%`
+                      : key === 'implied_valuation' ? `$${Number(val).toLocaleString()}`
+                      : val}
+                  </div>
+                </div>
+              )
+            })}
+          </div>
+        </div>
+      </div>
+    )
+  }
+
   return (
     <div className="modal-overlay" onClick={onClose}>
-      <div className="modal-box modal-box--wide" onClick={e => e.stopPropagation()}>
-        <div className="modal-header">
-          <h2 className="modal-title">📁 {project.name}</h2>
-          <button className="modal-close" onClick={onClose}>✕</button>
+      <div className="modal intake-modal" onClick={e => e.stopPropagation()}>
+        <div className="intake-header">
+          <h2>Edit Project</h2>
+          <p>Round 1 hasn't started — you can still update your pitch details.</p>
         </div>
-        <div className="project-detail-grid">
-          {Object.entries(DETAIL_LABELS).map(([key, label]) => {
-            const val = project[key]
-            if (!val && val !== 0) return null
-            return (
-              <div key={key} className="project-detail-row">
-                <div className="project-detail-label">{label}</div>
-                <div className="project-detail-value">
-                  {key === 'funding_amount' ? `$${Number(val).toLocaleString()}`
-                    : key === 'equity_percent' ? `${val}%`
-                    : key === 'implied_valuation' ? `$${Number(val).toLocaleString()}`
-                    : val}
+
+        <div className="completeness-bar-wrap">
+          <div className="completeness-label">
+            <span>Pitch strength</span>
+            <span className="completeness-pct">{pct}%</span>
+          </div>
+          <div className="completeness-track">
+            <div className="completeness-fill" style={{ width: `${pct}%` }} />
+          </div>
+          <div className="completeness-hint">{hint}</div>
+        </div>
+
+        <div className="intake-tabs">
+          {tabs.map(t => (
+            <button
+              key={t.id}
+              className={`intake-tab ${section === t.id ? 'active' : ''}`}
+              onClick={() => setSection(t.id)}
+            >{t.label}</button>
+          ))}
+        </div>
+
+        <div className="intake-body">
+          {section === 'basics' && (
+            <>
+              <div className="form-group">
+                <label>Company / Pitch Name <span className="required">*</span></label>
+                <input className="form-input" placeholder="e.g. HealthTrack AI" value={form.name} onChange={e => set('name', e.target.value)} />
+              </div>
+              <div className="form-group">
+                <label>One-liner <span className="required">*</span></label>
+                <input className="form-input" placeholder="e.g. AI expense tracking for finance teams" value={form.one_liner} onChange={e => set('one_liner', e.target.value)} />
+              </div>
+              <div className="form-row">
+                <div className="form-group">
+                  <label>Asking ($) <span className="required">*</span></label>
+                  <input className="form-input" type="number" placeholder="3000000" value={form.funding_amount} onChange={e => set('funding_amount', e.target.value)} />
+                </div>
+                <div className="form-group">
+                  <label>Equity (%) <span className="required">*</span></label>
+                  <input className="form-input" type="number" placeholder="10" value={form.equity_percent} onChange={e => set('equity_percent', e.target.value)} />
                 </div>
               </div>
-            )
-          })}
+              {implied && <div className="implied-val">Implied valuation: <strong>${implied}</strong></div>}
+              <div className="form-row">
+                <div className="form-group">
+                  <label>Industry</label>
+                  <input className="form-input" placeholder="e.g. HealthTech, SaaS" value={form.industry} onChange={e => set('industry', e.target.value)} />
+                </div>
+                <div className="form-group">
+                  <label>Stage</label>
+                  <select className="form-input" value={form.stage} onChange={e => set('stage', e.target.value)}>
+                    <option value="">Select stage</option>
+                    <option>Idea</option><option>Pre-revenue</option>
+                    <option>Revenue</option><option>Growth</option>
+                  </select>
+                </div>
+              </div>
+              <div className="form-group">
+                <label>What the money is for</label>
+                <input className="form-input" placeholder="e.g. Hiring, product development, marketing" value={form.use_of_funds} onChange={e => set('use_of_funds', e.target.value)} />
+              </div>
+            </>
+          )}
+          {section === 'business' && (
+            <>
+              <div className="form-group">
+                <label>Problem being solved</label>
+                <textarea className="form-input form-textarea" placeholder="What pain are you solving? Who feels it?" value={form.problem} onChange={e => set('problem', e.target.value)} />
+              </div>
+              <div className="form-group">
+                <label>Solution / Product</label>
+                <textarea className="form-input form-textarea" placeholder="What do you actually do?" value={form.solution} onChange={e => set('solution', e.target.value)} />
+              </div>
+              <div className="form-group">
+                <label>Revenue model</label>
+                <input className="form-input" placeholder="How do you make money?" value={form.revenue_model} onChange={e => set('revenue_model', e.target.value)} />
+              </div>
+              <div className="form-group">
+                <label>Current traction</label>
+                <input className="form-input" placeholder="MRR, users, contracts, pilots — or none" value={form.traction} onChange={e => set('traction', e.target.value)} />
+              </div>
+              <div className="form-group">
+                <label>Key metrics</label>
+                <input className="form-input" placeholder="CAC, LTV, churn, growth rate" value={form.key_metrics} onChange={e => set('key_metrics', e.target.value)} />
+              </div>
+            </>
+          )}
+          {section === 'market' && (
+            <>
+              <div className="form-group">
+                <label>Target customer</label>
+                <input className="form-input" placeholder="Who exactly buys this?" value={form.target_customer} onChange={e => set('target_customer', e.target.value)} />
+              </div>
+              <div className="form-group">
+                <label>Market size (TAM / SAM)</label>
+                <input className="form-input" placeholder="e.g. $4B TAM, $800M SAM" value={form.tam} onChange={e => set('tam', e.target.value)} />
+              </div>
+              <div className="form-group">
+                <label>Top 2–3 competitors</label>
+                <textarea className="form-input form-textarea" placeholder="Who else is in this space? What makes you different?" value={form.competitors} onChange={e => set('competitors', e.target.value)} />
+              </div>
+            </>
+          )}
+          {section === 'team' && (
+            <>
+              <div className="form-group">
+                <label>Founders & roles</label>
+                <textarea className="form-input form-textarea" placeholder="Who is on the team and what do they bring?" value={form.team} onChange={e => set('team', e.target.value)} />
+              </div>
+              <div className="form-group">
+                <label>Prior funding</label>
+                <input className="form-input" placeholder="e.g. $500K pre-seed from angels, or none" value={form.prior_funding} onChange={e => set('prior_funding', e.target.value)} />
+              </div>
+              <div className="form-group">
+                <label>Key risks you already know about</label>
+                <textarea className="form-input form-textarea" placeholder="Be honest. Red Team will use these." value={form.known_risks} onChange={e => set('known_risks', e.target.value)} />
+                <div className="field-hint">⚠️ Red Team will open with whatever you write here. Be specific.</div>
+              </div>
+            </>
+          )}
+        </div>
+
+        {error && <div className="form-error">{error}</div>}
+
+        <div className="intake-footer">
+          <button className="btn-ghost" onClick={onClose}>Cancel</button>
+          <button className="btn-primary" onClick={handleSave} disabled={!canSubmit || saving}>
+            {saving ? 'Saving...' : 'Save Changes →'}
+          </button>
         </div>
       </div>
     </div>
