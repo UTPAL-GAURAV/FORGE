@@ -115,6 +115,26 @@ function EmptyState({ onNew }) {
 
 function ProjectCard({ project }) {
   const [open, setOpen] = useState(true)
+  const [starting, setStarting] = useState(false)
+  const navigate = useNavigate()
+
+  const startSession = async () => {
+    setStarting(true)
+    try {
+      const r = await fetch(`${API_URL}/api/sessions`, {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ project_id: project.id }),
+      })
+      const session = await r.json()
+      if (!r.ok) throw new Error(session.error)
+      navigate(`/session/${session.id}`)
+    } catch (e) {
+      alert('Failed to start session: ' + e.message)
+      setStarting(false)
+    }
+  }
   return (
     <div className="project-card">
       <button className="project-card-header" onClick={() => setOpen(o => !o)}>
@@ -130,7 +150,7 @@ function ProjectCard({ project }) {
       {open && (
         <div className="project-rounds">
           {(!project.sessions || project.sessions.length === 0) ? (
-            <div className="round-empty">No sessions yet. <button className="link-btn">Start Round 1 →</button></div>
+            <div className="round-empty">No sessions yet. <button className="link-btn" onClick={startSession} disabled={starting}>{starting ? 'Starting...' : 'Start Round 1 →'}</button></div>
           ) : (
             project.sessions.map(s => <RoundRow key={s.id} session={s} />)
           )}
