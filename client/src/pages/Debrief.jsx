@@ -52,6 +52,9 @@ export default function Debrief() {
       if (r.ok) {
         setDebrief(data)
         setSession(data.session)
+        if (data.sidebarEvents?.length) {
+          setSidebarEvents(data.sidebarEvents)
+        }
         setState('ready')
         return
       }
