@@ -166,7 +166,7 @@ export default function Landing() {
             <div className="modal-logo">FORGE<span>.</span></div>
             <h2>Enter the room.</h2>
             <p>Sign in to start your pitch preparation session.<br />Four agents are waiting.</p>
-            <a className="btn-google" href="http://localhost:3001/api/auth/google">
+            <a className="btn-google" href={`${import.meta.env.VITE_API_URL || 'http://localhost:3001'}/api/auth/google`}>
               <GoogleIcon /> Continue with Google
             </a>
             <button className="modal-close" onClick={() => setShowModal(false)}>Cancel</button>

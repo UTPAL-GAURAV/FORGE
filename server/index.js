@@ -36,7 +36,14 @@ app.use(session({
 app.use(passport.initialize());
 app.use(passport.session());
 
-app.get('/api/health', (req, res) => res.json({ status: 'ok' }));
+app.get('/api/health', async (req, res) => {
+  try {
+    await pool.query('SELECT 1')
+    res.json({ status: 'ok', db: 'ok' })
+  } catch (err) {
+    res.status(500).json({ status: 'error', db: err.message })
+  }
+});
 app.use('/api/auth', authRoutes);
 app.use('/api/projects', projectRoutes);
 app.use('/api/sessions', sessionRoutes);
