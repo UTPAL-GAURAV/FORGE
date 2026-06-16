@@ -15,10 +15,9 @@ function headers(apiKey) {
 
 // Create a new Band chat room (called as Investor agent)
 async function createRoom(projectName, roundNumber) {
-  const name = roundNumber ? `${projectName} — Round ${roundNumber}` : projectName
   const res = await axios.post(
     `${BAND_BASE}/chats`,
-    { chat: { name } },
+    { chat: {} },
     { headers: headers(agents.investor.key) }
   )
   return res.data.data.id

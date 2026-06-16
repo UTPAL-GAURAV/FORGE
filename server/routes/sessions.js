@@ -581,6 +581,9 @@ router.get('/:id/deepgram-token', requireAuth, async (req, res) => {
     )
     res.json({ key: response.data.key })
   } catch (err) {
+    if (process.env.DEEPGRAM_API_KEY) {
+      return res.json({ key: process.env.DEEPGRAM_API_KEY })
+    }
     logErr('GET /sessions/:id/deepgram-token', err)
     res.status(500).json({ error: 'Deepgram not configured' })
   }

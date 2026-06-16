@@ -3,7 +3,7 @@ const { postEvent } = require('./bandService')
 const { withRetry } = require('./llmRetry')
 
 const AIML_BASE = 'https://api.aimlapi.com/v1'
-const MODEL = process.env.INVESTOR_MODEL || 'gpt-4o-mini'
+const MODEL = process.env.INVESTOR_MODEL || 'gpt-4.1-nano'
 
 // ─── SYSTEM PROMPT ───────────────────────────────────────────────────────────
 // Kept short and structured — no verbose prose (cost control)
