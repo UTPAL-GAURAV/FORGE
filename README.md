@@ -2,7 +2,7 @@
 
 **Adversarial pitch prep for founders. Four AI agents. One coordination layer.**
 
-> 🎥 [Watch the demo](#) · 🚀 [Live app](https://forge-chi-gold.vercel.app)
+> 🎥 [Watch the demo](https://drive.google.com/file/d/1awX_MroxFoT8gRvelH6wJzTUWaAP6ZPv/view?usp=sharing) · 🚀 [Live app](https://forge-chi-gold.vercel.app)
 
 Built for the **Band of Agents Hackathon** — demonstrating real multi-agent collaboration where Band is the coordination layer, not a wrapper.
 
